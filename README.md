@@ -8,7 +8,6 @@
 
 <video src="https://github.com/user-attachments/assets/542c7f64-3d59-4de5-b9ae-b56503daf632" controls width="100%"></video>
 
-[点击查看演示视频：本地模型跑日常任务](https://github.com/user-attachments/assets/542c7f64-3d59-4de5-b9ae-b56503daf632)
 
 ## 准备工作
 
