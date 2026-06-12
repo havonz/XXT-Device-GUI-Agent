@@ -11,13 +11,14 @@ function M.system_prompt()
 3. 在 iOS 设备上返回时，若页面上存在可见返回按钮，应该优先 CLICK 返回按钮；只有没有可见返回按钮时才使用 BACK。
 4. 遇到无法决策的情况时，优先使用 INFO 请求用户提供必要的信息或远控协助，不要盲目猜测或冒险尝试可能错误的操作。
 5. 不能输入任何手机号码、电话号码、身份证号、短信验证码、邮件验证码。遇到以上情况，必须使用 INFO 请求用户远控协助。
+6. 当用户目标是打开某个已知 App，或当前需要进入某个已知 App 时，优先使用 AWAKE 并填写 App 名称；不要先回到主屏幕翻页找图标。只有 AWAKE 失败、应用名不明确或必须处理当前屏幕阻挡时，才考虑 HOME、SLIDE 或 CLICK。
 
 # Action Space:
 1. CLICK：点击手机屏幕坐标，需包含点击的坐标位置 point。例如：action:CLICK	point:x,y
 2. TYPE：在当前输入框输入文字，需包含输入内容 value；如果键盘未弹起，应先 CLICK 输入框。例如：action:TYPE	value:输入内容
 3. COMPLETE：任务完成后向用户报告结果，需包含报告内容 return。例如：action:COMPLETE	return:完成任务后向用户报告的内容
 4. WAIT：等待指定时长，需包含等待时间 value（秒）。例如：action:WAIT	value:2
-5. AWAKE：唤醒指定应用，需包含应用名称 value。例如：action:AWAKE	value:设置
+5. AWAKE：唤醒或打开指定应用，需包含应用名称 value。例如：action:AWAKE	value:设置
 6. INFO：请求中控端人工远控，必须包含具体说明 value，不能只写“需要用户补充信息”。遇到需要手机号或其它无法稳定自动处理的问题时，使用 INFO 让用户远控解决当前屏幕后点击完成。例如：action:INFO	value:请远控完成当前验证后点击完成
 7. ABORT：终止当前任务，需包含 value 说明原因。例如：action:ABORT	value:无法继续
 8. SLIDE：在手机屏幕上滑动，需包含起点 point1 和终点 point2。例如：action:SLIDE	point1:x1,y1	point2:x2,y2
@@ -134,7 +135,17 @@ function M.call_text_model(config, text, max_tokens)
     return post_chat(config, payload, config.request_timeout)
 end
 
-function M.call_model(config, image_data_url, history)
+function M.call_model(config, image_data_url, history, retry_instruction)
+    local content = {
+        { type = "text", text = M.system_prompt() },
+        { type = "text", text = M.user_prompt(config.task, history) },
+        { type = "image_url", image_url = { url = image_data_url } },
+    }
+    if type(retry_instruction) == "string" and retry_instruction ~= "" then
+        content[#content + 1] = { type = "text", text = retry_instruction }
+    end
+    content[#content + 1] = { type = "text", text = "在执行操作之前，请务必回顾历史操作记录和动作空间，先在 <THINK> 中思考，然后输出 verify/note/explain/action/key_process/summary。" }
+
     local payload = {
         model = config.model,
         temperature = config.temperature,
@@ -143,12 +154,7 @@ function M.call_model(config, image_data_url, history)
         messages = {
             {
                 role = "user",
-                content = {
-                    { type = "text", text = M.system_prompt() },
-                    { type = "text", text = M.user_prompt(config.task, history) },
-                    { type = "image_url", image_url = { url = image_data_url } },
-                    { type = "text", text = "在执行操作之前，请务必回顾历史操作记录和动作空间，先在 <THINK> 中思考，然后输出 verify/note/explain/action/key_process/summary。" },
-                },
+                content = content,
             },
         },
     }

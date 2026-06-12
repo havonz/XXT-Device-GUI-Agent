@@ -65,6 +65,18 @@ function M.normalize(config)
     if config.format_repair_retry_count < 0 then
         config.format_repair_retry_count = 0
     end
+    if config.parse_retry_count < 1 then
+        config.parse_retry_count = 1
+    end
+    if config.parse_context_reset_count < 1 then
+        config.parse_context_reset_count = 1
+    end
+    if config.parse_retry_count < config.parse_context_reset_count then
+        config.parse_retry_count = config.parse_context_reset_count
+    end
+    if config.coordinate_retry_count < 0 then
+        config.coordinate_retry_count = 0
+    end
     if config.recent_history_steps < 1 then
         config.recent_history_steps = 1
     end
@@ -94,6 +106,9 @@ function M.from_ui(cfg)
         delay_after_action_ms = cfg_number(cfg, "动作后延迟毫秒数", 1200),
         model_retry_count = cfg_number(cfg, "模型请求重试次数", 2),
         format_repair_retry_count = cfg_number(cfg, "动作格式修复次数", 1),
+        parse_retry_count = cfg_number(cfg, "解析失败重问次数", 8),
+        parse_context_reset_count = cfg_number(cfg, "解析失败清上下文阈值", 3),
+        coordinate_retry_count = cfg_number(cfg, "坐标缺失重问次数", 3),
         recent_history_steps = cfg_number(cfg, "最近历史保留步数", 8),
         enable_state_compression = cfg_enabled(cfg, "启用历史压缩", true),
         state_compression_interval = cfg_number(cfg, "历史压缩间隔步数", 10),
@@ -146,6 +161,15 @@ function M.merge_launch_args(config)
     end
     if tonumber(args.recent_history_steps) then
         config.recent_history_steps = tonumber(args.recent_history_steps)
+    end
+    if tonumber(args.coordinate_retry_count) then
+        config.coordinate_retry_count = tonumber(args.coordinate_retry_count)
+    end
+    if tonumber(args.parse_retry_count) then
+        config.parse_retry_count = tonumber(args.parse_retry_count)
+    end
+    if tonumber(args.parse_context_reset_count) then
+        config.parse_context_reset_count = tonumber(args.parse_context_reset_count)
     end
     if args.enable_state_compression ~= nil then
         config.enable_state_compression = enabled_value(args.enable_state_compression, config.enable_state_compression)

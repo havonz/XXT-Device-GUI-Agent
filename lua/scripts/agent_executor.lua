@@ -1,4 +1,5 @@
 local Parser = require("agent_parser")
+local Ui = require("agent_ui")
 
 local M = {}
 
@@ -78,18 +79,88 @@ function M.capture_image_data_url(config, step)
     return "data:image/jpeg;base64," .. jpg:base64_encode(), screenshot_path
 end
 
-local function swipe_pixels(x0, y0, x1, y1, duration_ms)
-    duration_ms = duration_ms or 800
-    local steps = 24
-    local delay = math.floor(duration_ms / steps)
-    touch.on(1, x0, y0)
+local function round_pixel(value)
+    return math.floor(value + 0.5)
+end
+
+local function same_point(x1, y1, x2, y2)
+    return math.abs(x1 - x2) <= 1 and math.abs(y1 - y2) <= 1
+end
+
+local function point_offset_clamped(x, y, ux, uy, offset, width, height)
+    local px = round_pixel(x + ux * offset)
+    local py = round_pixel(y + uy * offset)
+    return clamp(px, 0, width - 1), clamp(py, 0, height - 1)
+end
+
+local function precise_swipe_overshoot(distance)
+    if distance < 24 then
+        return 0
+    end
+    return clamp(round_pixel(distance * 0.02), 6, 20)
+end
+
+local function move_finger_linear(finger, x0, y0, x1, y1, step_len, step_delay)
+    step_len = step_len or 10
+    step_delay = step_delay or 1
+    local dx = x1 - x0
+    local dy = y1 - y0
+    local distance = math.sqrt(dx * dx + dy * dy)
+    local steps = math.max(1, math.ceil(distance / step_len))
     for i = 1, steps do
         local t = i / steps
-        local x = math.floor(x0 + (x1 - x0) * t + 0.5)
-        local y = math.floor(y0 + (y1 - y0) * t + 0.5)
-        touch.move(1, x, y)
-        sys.msleep(delay)
+        local x = round_pixel(x0 + dx * t)
+        local y = round_pixel(y0 + dy * t)
+        touch.move(finger, x, y)
+        if step_delay > 0 then
+            sys.msleep(step_delay)
+        end
     end
+end
+
+local function swipe_pixels(x0, y0, x1, y1)
+    local width, height = screen.size()
+    x0 = clamp(x0, 0, width - 1)
+    y0 = clamp(y0, 0, height - 1)
+    x1 = clamp(x1, 0, width - 1)
+    y1 = clamp(y1, 0, height - 1)
+
+    local dx = x1 - x0
+    local dy = y1 - y0
+    local distance = math.sqrt(dx * dx + dy * dy)
+    if distance < 2 then
+        touch.on(1, x0, y0)
+        sys.msleep(80)
+        touch.off(1, x0, y0)
+        return
+    end
+
+    local ux = dx / distance
+    local uy = dy / distance
+    local overshoot = precise_swipe_overshoot(distance)
+    if overshoot == 0 then
+        touch.on(1, x0, y0)
+        move_finger_linear(1, x0, y0, x1, y1, 2, 8)
+        sys.msleep(120)
+        touch.off(1, x1, y1)
+        return
+    end
+
+    local ox, oy = point_offset_clamped(x1, y1, ux, uy, overshoot, width, height)
+    local blocked_by_edge = same_point(ox, oy, x1, y1)
+    touch.on(1, x0, y0)
+    move_finger_linear(1, x0, y0, ox, oy, 10, 1)
+
+    if blocked_by_edge then
+        local sx, sy = point_offset_clamped(x1, y1, -ux, -uy, math.min(overshoot, 24), width, height)
+        if not same_point(sx, sy, x1, y1) then
+            move_finger_linear(1, ox, oy, sx, sy, 1, 20)
+            ox, oy = sx, sy
+        end
+    end
+
+    move_finger_linear(1, ox, oy, x1, y1, 1, 20)
+    sys.msleep(200)
     touch.off(1, x1, y1)
 end
 
@@ -188,7 +259,7 @@ local function request_human_assist(config, lcc, action, image_data_url, width, 
         },
     }
 
-    sys.toast("等待人工远控")
+    Ui.toast("等待人工远控")
     local result, err, task = lcc.assist.request_control(options)
 
     if not result then
@@ -229,21 +300,15 @@ function M.execute_action(config, lcc, action, image_data_url)
     elseif action_type == "SLIDE" then
         local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), width, height)
         local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), width, height)
-        swipe_pixels(x0, y0, x1, y1, 900)
+        swipe_pixels(x0, y0, x1, y1)
         return false, { executed = "slide", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
     elseif action_type == "LONGPRESS_DRAG" then
         local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), width, height)
         local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), width, height)
         touch.on(1, x0, y0)
         sys.msleep(900)
-        local steps = 24
-        for i = 1, steps do
-            local t = i / steps
-            local x = math.floor(x0 + (x1 - x0) * t + 0.5)
-            local y = math.floor(y0 + (y1 - y0) * t + 0.5)
-            touch.move(1, x, y)
-            sys.msleep(45)
-        end
+        move_finger_linear(1, x0, y0, x1, y1, 2, 12)
+        sys.msleep(200)
         touch.off(1, x1, y1)
         return false, { executed = "long_press_drag", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
     elseif action_type == "SCROLL" then
@@ -266,7 +331,7 @@ function M.execute_action(config, lcc, action, image_data_url)
         end
         x1 = clamp(x1, 0, width - 1)
         y1 = clamp(y1, 0, height - 1)
-        swipe_pixels(x, y, x1, y1, 900)
+        swipe_pixels(x, y, x1, y1)
         return false, { executed = "scroll", direction = direction, x0 = x, y0 = y, x1 = x1, y1 = y1 }
     elseif action_type == "TYPE" then
         local point = Parser.field(action, "point", "Point")
@@ -297,7 +362,7 @@ function M.execute_action(config, lcc, action, image_data_url)
     elseif action_type == "AWAKE" then
         local selected, candidates, err = resolve_app(Parser.field(action, "value", "Value", "app", "App"))
         if not selected then
-            return true, { error = err, candidates = candidates }
+            return false, { error = err, candidates = candidates, recoverable = true, executed = "awake_failed" }
         end
         local status = app.run(selected.bundle_id)
         return false, { executed = "awake", bundle_id = selected.bundle_id, name = selected.name, status = status }
@@ -333,7 +398,7 @@ function M.execute_action(config, lcc, action, image_data_url)
         return false, { executed = "hotkey", key = code }
     elseif action_type == "BACK" then
         local y = math.floor(height / 2)
-        swipe_pixels(3, y, math.floor(width * 0.35), y, 450)
+        swipe_pixels(3, y, math.floor(width * 0.35), y)
         return false, { executed = "back" }
     elseif action_type == "WAIT" then
         local sec = tonumber(Parser.field(action, "value", "Value", "seconds", "Seconds")) or 2
