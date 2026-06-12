@@ -1,0 +1,100 @@
+{
+  "ScriptInfo": {
+    "Name": "XXT-Device-GUI-Agent",
+    "Version": "0.0.1",
+    "Developer": "havonz",
+    "Instructions": "使用 XXTouch 脚本实现的基于外部视觉模型设备日常界面操作 Agent"
+  },
+  "RunOptions": {
+    "promptBeforeRun": true
+  },
+  "UI": [
+    {
+      "type": "Edit",
+      "caption": "模型接口 URL",
+      "text": "http://192.168.11.52:1234/v1/chat/completions",
+      "placeholder": "http://192.168.11.52:1234/v1/chat/completions"
+    },
+    {
+      "type": "Edit",
+      "caption": "模型名称",
+      "text": "stepfun-ai_gelab-zero-4b-preview",
+      "placeholder": "stepfun-ai_gelab-zero-4b-preview"
+    },
+    {
+      "type": "Edit",
+      "caption": "API Key",
+      "text": "lmstudio",
+      "placeholder": "例如：sk-xxxxxxx"
+    },
+    {
+      "type": "Edit",
+      "caption": "任务内容",
+      "text": "打开抖音签到",
+      "placeholder": "请输入内容",
+      "nonEmpty": false,
+      "allowMultiline": true,
+      "visibleRows": 5
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "最大步数",
+      "item": [
+        "20",
+        "40",
+        "80",
+        "160",
+        "320",
+        "640"
+      ],
+      "select": 1,
+      "numPerLine": 6
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "请求超时时间（秒）",
+      "item": [
+        "60",
+        "120",
+        "240",
+        "320",
+        "480",
+        "640"
+      ],
+      "select": 2,
+      "numPerLine": 6
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "人工介入超时时间（秒）",
+      "item": [
+        "60",
+        "120",
+        "300",
+        "600",
+        "900",
+        "1200"
+      ],
+      "select": 3,
+      "numPerLine": 6
+    },
+    {
+      "type": "ComboBox",
+      "caption": "动作后延迟毫秒数",
+      "item": [
+        "300",
+        "600",
+        "1200",
+        "1800",
+        "2400"
+      ],
+      "select": 3,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    }
+  ],
+  "KeyList": {},
+  "Config": {}
+}
