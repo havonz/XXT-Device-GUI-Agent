@@ -11,6 +11,15 @@
   "UI": [
     {
       "type": "Edit",
+      "caption": "任务内容",
+      "text": "打开抖音签到",
+      "placeholder": "请输入内容",
+      "nonEmpty": false,
+      "allowMultiline": true,
+      "visibleRows": 5
+    },
+    {
+      "type": "Edit",
       "caption": "模型接口 URL",
       "text": "http://192.168.11.52:1234/v1/chat/completions",
       "placeholder": "http://192.168.11.52:1234/v1/chat/completions"
@@ -28,13 +37,33 @@
       "placeholder": "例如：sk-xxxxxxx"
     },
     {
-      "type": "Edit",
-      "caption": "任务内容",
-      "text": "打开抖音签到",
-      "placeholder": "请输入内容",
-      "nonEmpty": false,
-      "allowMultiline": true,
-      "visibleRows": 5
+      "type": "ComboBox",
+      "caption": "模型温度",
+      "item": [
+        "0.1",
+        "0.5",
+        "1"
+      ],
+      "select": 1,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]+(\\.[0-9]+)?",
+      "patternMessage": "请输入数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "单次响应最大 Token",
+      "item": [
+        "1024",
+        "2048",
+        "4096",
+        "8192"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
     },
     {
       "type": "RadioGroup",
@@ -80,6 +109,50 @@
     },
     {
       "type": "ComboBox",
+      "caption": "模型请求重试次数",
+      "item": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "select": 3,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "动作格式修复次数",
+      "item": [
+        "0",
+        "1",
+        "2"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "截图 JPEG 质量",
+      "item": [
+        "45",
+        "55",
+        "70",
+        "85"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,3}",
+      "patternMessage": "请输入 1-100 的数字"
+    },
+    {
+      "type": "ComboBox",
       "caption": "动作后延迟毫秒数",
       "item": [
         "300",
@@ -93,6 +166,83 @@
       "nonEmpty": true,
       "validationRegex": "[0-9]{1,}",
       "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "启用历史压缩",
+      "item": [
+        "开启",
+        "关闭"
+      ],
+      "select": 1,
+      "numPerLine": 2
+    },
+    {
+      "type": "ComboBox",
+      "caption": "最近历史保留步数",
+      "item": [
+        "4",
+        "8",
+        "12",
+        "20"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "历史压缩间隔步数",
+      "item": [
+        "5",
+        "10",
+        "20"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "压缩保留最近步数",
+      "item": [
+        "4",
+        "6",
+        "10"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "ComboBox",
+      "caption": "压缩状态最大字符数",
+      "item": [
+        "2000",
+        "3000",
+        "5000"
+      ],
+      "select": 2,
+      "canEdit": true,
+      "nonEmpty": true,
+      "validationRegex": "[0-9]{1,}",
+      "patternMessage": "只能是纯数字"
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "保存每步截图",
+      "item": [
+        "关闭",
+        "开启"
+      ],
+      "select": 1,
+      "numPerLine": 2
     }
   ],
   "KeyList": {},
