@@ -118,7 +118,11 @@ local function move_finger_linear(finger, x0, y0, x1, y1, step_len, step_delay)
     end
 end
 
-local function swipe_pixels(x0, y0, x1, y1)
+local function swipe_pixels(x0, y0, x1, y1, prevent_inertia)
+    if prevent_inertia == nil then
+        prevent_inertia = true
+    end
+
     local width, height = screen.size()
     x0 = clamp(x0, 0, width - 1)
     y0 = clamp(y0, 0, height - 1)
@@ -132,6 +136,14 @@ local function swipe_pixels(x0, y0, x1, y1)
         touch.on(1, x0, y0)
         sys.msleep(80)
         touch.off(1, x0, y0)
+        return
+    end
+
+    if not prevent_inertia then
+        touch.on(1, x0, y0)
+        move_finger_linear(1, x0, y0, x1, y1, 10, 1)
+        sys.msleep(120)
+        touch.off(1, x1, y1)
         return
     end
 
@@ -398,7 +410,7 @@ function M.execute_action(config, lcc, action, image_data_url)
         return false, { executed = "hotkey", key = code }
     elseif action_type == "BACK" then
         local y = math.floor(height / 2)
-        swipe_pixels(3, y, math.floor(width * 0.35), y)
+        swipe_pixels(3, y, math.floor(width * 0.35), y, false)
         return false, { executed = "back" }
     elseif action_type == "WAIT" then
         local sec = tonumber(Parser.field(action, "value", "Value", "seconds", "Seconds")) or 2
