@@ -14,8 +14,8 @@
 你需要准备：
 
 - 一台可运行 XXTouch 的 iOS 设备。
-- VSCode，并安装可连接 XXTouch / XXTLanControl 的相关扩展。
-- 可访问设备的 XXTLanControl 中控。
+- VSCode，并安装 [XXTouch 扩展](vscode:extension/xxtouch.xxtouch)。
+- 可访问设备的 [XXTLanControl](https://xxtlc-releases.xxtouch.app/) 中控。
 - 一个 OpenAI Chat Completions 兼容的视觉模型接口。
 
 模型可以使用 GELab-Zero 系列模型，也可以使用其它能识别手机截图并输出操作动作的多模态模型。
@@ -23,14 +23,16 @@
 ## 使用步骤
 
 1. 用 VSCode 打开本项目目录。
-2. 在 VSCode 里连接目标 XXTouch 设备。
-3. 通过 XXTLanControl 相关功能把当前项目打包成中控脚本包。
-4. 打开 XXTLanControl 中控页面。
-5. 在中控里找到并启动这个脚本包。
-6. 启动后会弹出配置界面。
+2. 在 VSCode 的 XXTouch 扩展设备列表上方点击齿轮连接到 XXTLanControl。
+3. 在设备列表中选中一台设备。
+4. 随便打开一个 .lua 文件，点编辑器右上角 "打包成中控脚本包" 按钮。
+5. 把脚本包导入到 XXTLanControl 中。
+6. XXTLanControl 里找到并启动这个脚本包。
 7. 填写任务内容、模型接口 URL、模型名称和 API Key。
 8. 确认配置后开始运行。
 9. 在中控日志或设备日志里查看执行过程和最终结果。
+
+<video src="https://github.com/user-attachments/assets/c169e24e-120d-4f0c-b0a7-bddc22c92c92" controls width="100%"></video>
 
 ## 配置界面
 
