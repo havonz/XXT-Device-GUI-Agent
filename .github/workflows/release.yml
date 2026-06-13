@@ -145,13 +145,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          tag="v${{ steps.package.outputs.version }}"
+          tag="${{ steps.package.outputs.version }}"
           name="${{ steps.package.outputs.name }}"
           version="${{ steps.package.outputs.version }}"
           artifact="${{ steps.package.outputs.artifact_path }}"
           notes_file="${RUNNER_TEMP:-.}/release-notes.md"
 
-          previous_tag="$(git tag --list 'v*' --sort=-v:refname | awk -v current="$tag" '$0 != current { print; exit }')"
+          previous_tag="$(
+            git tag --list --sort=-v:refname |
+              awk -v current="$tag" -v vcurrent="v$tag" \
+                '$0 ~ /^v?[0-9]+([.][0-9]+)*([-+].*)?$/ && $0 != current && $0 != vcurrent { print; exit }'
+          )"
           if [ -n "$previous_tag" ]; then
             changelog_url="https://github.com/${GITHUB_REPOSITORY}/compare/${previous_tag}...${tag}"
           else
@@ -161,7 +165,7 @@ jobs:
           {
             echo "Automated release for $GITHUB_SHA."
             echo
-            echo "Full Changelog: $changelog_url"
+            echo "**Full Changelog**: $changelog_url"
           } > "$notes_file"
 
           if gh release view "$tag" >/dev/null 2>&1; then

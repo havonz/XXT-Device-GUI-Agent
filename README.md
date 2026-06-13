@@ -22,15 +22,14 @@
 
 ## 使用步骤
 
-1. 用 VSCode 打开本项目目录。
-2. 在 VSCode 的 XXTouch 扩展设备列表上方点击齿轮连接到 XXTLanControl。
-3. 在设备列表中选中一台设备。
-4. 随便打开一个 .lua 文件，点编辑器右上角 "打包成中控脚本包" 按钮。
-5. 把脚本包导入到 XXTLanControl 中。
-6. XXTLanControl 里找到并启动这个脚本包。
-7. 填写任务内容、模型接口 URL、模型名称和 API Key。
-8. 确认配置后开始运行。
-9. 在中控日志或设备日志里查看执行过程和最终结果。
+1. 从 [Releases](https://github.com/havonz/XXT-Device-GUI-Agent/releases) 下载最新的脚本包。
+2. 在电脑上打开 [XXTLanControl](https://xxtlc-releases.xxtouch.app/) 并把脚本包传入到 `文件管理` 中，双击安装这个脚本包。
+3. 在 XXTLanControl 的 `脚本列表` 中选中这个脚本，选中设备，`运行脚本`。
+4. 填写任务内容、模型接口 URL、模型名称和 API Key。
+5. 确认配置后开始运行。
+6. 在中控日志或设备日志里查看执行过程和最终结果。
+
+## 开发打包步骤
 
 <video src="https://github.com/user-attachments/assets/c169e24e-120d-4f0c-b0a7-bddc22c92c92" controls width="100%"></video>
 
