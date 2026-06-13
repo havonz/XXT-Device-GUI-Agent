@@ -376,6 +376,10 @@ function M.execute_action(config, lcc, action, image_data_url)
         if not selected then
             return false, { error = err, candidates = candidates, recoverable = true, executed = "awake_failed" }
         end
+        if device.is_screen_locked() then
+            device.unlock_screen()
+            sys.msleep(500)
+        end
         local status = app.run(selected.bundle_id)
         return false, { executed = "awake", bundle_id = selected.bundle_id, name = selected.name, status = status }
     elseif action_type == "HOME" then
