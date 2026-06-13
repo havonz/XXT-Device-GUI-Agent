@@ -79,6 +79,17 @@ local function action_to_json(action)
     return json.encode(sanitized_action(action)) or "{}"
 end
 
+local function assist_user_input_line(execution)
+    if type(execution) ~= "table" or type(execution.assist_user_input_text) ~= "string" then
+        return nil
+    end
+    local text = limit_text(execution.assist_user_input_text, 800)
+    if text == "" then
+        return nil
+    end
+    return "assist_user_input: 用户手动提交了以下内容，应作为下一步行动依据：" .. text
+end
+
 function M.record_to_history(record)
     if type(record) ~= "table" then
         return ""
@@ -93,8 +104,12 @@ function M.record_to_history(record)
         "action: " .. action_to_json(action),
         "key_process: " .. text_field(action, "key_process"),
         "summary: " .. text_field(action, "summary"),
-        "execution: " .. (json.encode(execution) or "{}"),
     }
+    local assist_line = assist_user_input_line(execution)
+    if assist_line then
+        lines[#lines + 1] = assist_line
+    end
+    lines[#lines + 1] = "execution: " .. (json.encode(execution) or "{}")
     return table.concat(lines, "\n")
 end
 

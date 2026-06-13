@@ -265,6 +265,17 @@ local function sensitive_input_reason(action, text)
     return nil
 end
 
+local function assist_note_text(result)
+    if type(result) ~= "table" or type(result.note) ~= "string" then
+        return nil
+    end
+    local note = trim_text(result.note)
+    if note == "" then
+        return nil
+    end
+    return note
+end
+
 local function request_human_assist(config, lcc, action, image_data_url, width, height)
     if not lcc.assist then
         return true, { error = "XXTLanControl.assist unavailable", reason = "INFO" }
@@ -303,13 +314,19 @@ local function request_human_assist(config, lcc, action, image_data_url, width, 
         }
     end
 
-    return false, {
+    local execution = {
         executed = "assist_control",
         assist_type = "control",
         question = question,
         completed = result.completed ~= false,
         result = result,
     }
+    local note = assist_note_text(result)
+    if note then
+        execution.manual_submit = true
+        execution.assist_user_input_text = note
+    end
+    return false, execution
 end
 
 local function ui_element_input_text(target, text)
