@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - README.md
   workflow_dispatch:
 
 permissions:
@@ -20,8 +22,114 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read package metadata
+        id: metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          main_json = json.loads(Path("lua/scripts/main.json").read_text(encoding="utf-8"))
+          script_info = main_json.get("ScriptInfo", {})
+
+          config = {}
+          config_path = Path(".config")
+          if config_path.exists():
+              config = json.loads(config_path.read_text(encoding="utf-8"))
+
+          def config_info_value(key):
+              for item in config.get("information", []):
+                  if isinstance(item, list) and len(item) >= 2 and item[0] == key:
+                      return item[1]
+              return None
+
+          name = script_info.get("Name") or config.get("bid") or os.environ["GITHUB_REPOSITORY"].split("/")[-1]
+          version = script_info.get("Version") or config_info_value("Version")
+          if not version:
+              raise SystemExit("missing ScriptInfo.Version in lua/scripts/main.json")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"name={name}\n")
+              output.write(f"version={version}\n")
+          PY
+
+      - name: Check release eligibility
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${{ steps.metadata.outputs.version }}"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ]; then
+              previous_version="$(python3 - "$before" <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          ref = sys.argv[1]
+
+          def read_file(path):
+              try:
+                  return subprocess.check_output(
+                      ["git", "show", f"{ref}:{path}"],
+                      encoding="utf-8",
+                      stderr=subprocess.DEVNULL,
+                  )
+              except subprocess.CalledProcessError:
+                  return None
+
+          def config_info_value(config, key):
+              for item in config.get("information", []):
+                  if isinstance(item, list) and len(item) >= 2 and item[0] == key:
+                      return item[1]
+              return None
+
+          main_text = read_file("lua/scripts/main.json")
+          config_text = read_file(".config")
+          script_info = json.loads(main_text).get("ScriptInfo", {}) if main_text else {}
+          config = json.loads(config_text) if config_text else {}
+          version = script_info.get("Version") or config_info_value(config, "Version") or ""
+          print(version)
+          PY
+              )"
+
+              if [ "$previous_version" = "$tag" ]; then
+                echo "Version $tag did not change; skipping release."
+                echo "should_release=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+          fi
+
+          candidate_tags=("$tag")
+          if [[ "$tag" != v* ]]; then
+            candidate_tags+=("v$tag")
+          fi
+
+          for candidate_tag in "${candidate_tags[@]}"; do
+            if gh release view "$candidate_tag" >/dev/null 2>&1; then
+              echo "Release $candidate_tag already exists; skipping."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if git rev-parse -q --verify "refs/tags/$candidate_tag" >/dev/null; then
+              echo "Tag $candidate_tag already exists; skipping."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
       - name: Build .xxtlca package
         id: package
+        if: steps.release_check.outputs.should_release == 'true'
         shell: bash
         run: |
           python3 - <<'PY'
@@ -141,6 +249,7 @@ jobs:
           PY
 
       - name: Publish GitHub release
+        if: steps.release_check.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

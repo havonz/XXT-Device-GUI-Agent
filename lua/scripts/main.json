@@ -1,7 +1,7 @@
 {
   "ScriptInfo": {
     "Name": "XXT-Device-GUI-Agent",
-    "Version": "0.0.3",
+    "Version": "0.0.4",
     "Developer": "havonz",
     "Instructions": "使用 XXTouch 脚本实现的基于外部视觉模型设备日常界面操作 Agent"
   },
@@ -31,14 +31,14 @@
     {
       "type": "Edit",
       "caption": "模型接口 URL",
-      "text": "http://192.168.11.52:1234/v1/chat/completions",
-      "placeholder": "http://192.168.11.52:1234/v1/chat/completions"
+      "text": "http://192.168.11.52:46999/v1/chat/completions",
+      "placeholder": "http://192.168.11.52:46999/v1/chat/completions"
     },
     {
       "type": "Edit",
       "caption": "模型名称",
-      "text": "stepfun-ai_gelab-zero-4b-preview",
-      "placeholder": "stepfun-ai_gelab-zero-4b-preview"
+      "text": "gelab-zero-4b-preview",
+      "placeholder": "例如：gelab-zero-4b-preview"
     },
     {
       "type": "Edit",

@@ -19,15 +19,17 @@
 - 一个 OpenAI Chat Completions 兼容的视觉模型接口。
 
 模型可以使用 GELab-Zero 系列模型，也可以使用其它能识别手机截图并输出操作动作的多模态模型。
+如果要在本地部署 GELab-Zero 模型，可以从 [gelab-zero-ollama-launcher Releases](https://github.com/havonz/gelab-zero-ollama-launcher/releases) 下载一键部署工具。
 
 ## 使用步骤
 
 1. 从 [Releases](https://github.com/havonz/XXT-Device-GUI-Agent/releases) 下载最新的脚本包。
-2. 在电脑上打开 [XXTLanControl](https://xxtlc-releases.xxtouch.app/) 并把脚本包传入到 `文件管理` 中，双击安装这个脚本包。
-3. 在 XXTLanControl 的 `脚本列表` 中选中这个脚本，选中设备，`运行脚本`。
-4. 填写任务内容、模型接口 URL、模型名称和 API Key。
-5. 确认配置后开始运行。
-6. 在中控日志或设备日志里查看执行过程和最终结果。
+2. 如果使用本地 GELab-Zero 模型，先用 [一键部署工具](https://github.com/havonz/gelab-zero-ollama-launcher/releases) 部署模型服务。
+3. 在电脑上打开 [XXTLanControl](https://xxtlc-releases.xxtouch.app/) 并把脚本包传入到 `文件管理` 中，双击安装这个脚本包。
+4. 在 XXTLanControl 的 `脚本列表` 中选中这个脚本，选中设备，`运行脚本`。
+5. 填写任务内容、模型接口 URL、模型名称和 API Key。本地模型部署完成后，把部署工具里显示的服务 URL 和模型名称填到这里。
+6. 确认配置后开始运行。
+7. 在中控日志或设备日志里查看执行过程和最终结果。
 
 ## 开发打包步骤
 
