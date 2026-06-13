@@ -73,7 +73,7 @@ local function coordinate_retry_instruction(parse_err, model_text, retry_index, 
         action_type = "动作"
     end
     local slide_instruction = ""
-    if action_type == "SLIDE" or action_type == "LONGPRESS_DRAG" then
+    if Parser.is_two_point_action(action_type) then
         slide_instruction = "\n你上次可能只给了 point1 或 point2 中的一个，这种输出无效。请重新给出完整的 point1 和 point2；不要只补一个点。"
     end
     return [[
@@ -119,6 +119,7 @@ local function parse_retry_instruction(parse_err, model_text, retry_index, conte
 请重新观察当前截图，继续完成用户目标，但必须输出一个脚本可执行动作。
 输出要求：
 - action 必须是动作名本身，不要把 JSON 对象塞进 action 字段。
+- 只能输出一个 action 字段；不要在 key_process、summary 或其它字段里再次写 action。
 - 如果使用 CLICK、LONGPRESS、DOUBLECLICK，必须包含 point:x,y。
 - 如果使用 SLIDE 或 LONGPRESS_DRAG，必须包含 point1:x1,y1 和 point2:x2,y2。
 - 坐标必须使用 0-1000 屏幕坐标。
@@ -150,6 +151,30 @@ local function make_guard_action(original_action, reason)
         explain = "请求人工确认",
         key_process = Parser.field(original_action, "key_process", "Key_process") or "检测到重复动作，暂停自动执行",
         summary = "检测到重复动作，已转人工确认：" .. Memory.action_signature(original_action),
+    }
+end
+
+local function action_type(action)
+    return Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+end
+
+local function is_complete_confirmation_pending(record)
+    return type(record) == "table"
+        and type(record.execution) == "table"
+        and record.execution.reason == "COMPLETE_CONFIRMATION_PENDING"
+end
+
+local function complete_needs_confirmation(memory)
+    local records = (memory and memory.records) or {}
+    return not is_complete_confirmation_pending(records[#records])
+end
+
+local function complete_confirmation_execution(action)
+    return {
+        executed = "complete_confirmation_pending",
+        reason = "COMPLETE_CONFIRMATION_PENDING",
+        message = "模型首次报告任务完成，已等待下一帧重新确认。",
+        proposed_message = Parser.field(action, "return", "Return", "value", "Value") or "完成",
     }
 end
 
@@ -315,7 +340,13 @@ local function run_step(step, memory)
         })
     end
 
-    local should_stop, execution = Executor.execute_action(CONFIG, LCC, action, image_data_url)
+    local should_stop, execution
+    if action_type(action) == "COMPLETE" and complete_needs_confirmation(memory) then
+        should_stop = false
+        execution = complete_confirmation_execution(action)
+    else
+        should_stop, execution = Executor.execute_action(CONFIG, LCC, action, image_data_url)
+    end
     local record = {
         step = step,
         action = action,

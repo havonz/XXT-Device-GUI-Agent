@@ -16,6 +16,9 @@ function M.system_prompt()
 8. Safari 地址栏或搜索框中已有选中文本时，直接 TYPE 新内容即可覆盖；不要反复点击右侧清除按钮，除非截图清楚显示必须先清除。
 9. 当用户明确要求打开某个网址、URL 或链接时，优先使用 OPENURL 直接打开，不要手动打开浏览器、点击地址栏、TYPE 网址再 ENTER。
 10. 如果本轮提供了结构化文本元素列表，它只对应当前截图，下一次动作后会过期；不要把完整元素 JSON 复制进 note、summary、key_process 或历史总结。
+11. 只有当前截图清楚显示用户目标已经全部达成时，才能使用 COMPLETE。不要根据计划、预期结果或历史动作推断完成；如果当前还只是打开了页面、聚焦输入框、准备输入或准备提交，必须继续执行下一步动作。
+12. 如果任务包含搜索，只有当前截图显示搜索词已经提交并出现结果页，或页面中明确显示该搜索词的已提交搜索结果，才算完成。仅看到搜索主页、地址栏网址、搜索框聚焦或键盘弹出，都不算完成。
+13. 如果历史 execution 中出现 COMPLETE_CONFIRMATION_PENDING，说明上一次 COMPLETE 被系统拦截等待复核；必须重新根据当前截图判断。当前截图仍未满足全部目标时，继续执行需要的动作，不要为了确认而重复 COMPLETE。
 
 # Action Space:
 1. CLICK：点击手机屏幕坐标，需包含点击的坐标位置 point。例如：action:CLICK	point:x,y
@@ -40,6 +43,7 @@ function M.system_prompt()
 verify:上一步是否生效的判断	note:当前页面中和任务相关的事实	explain:解释	action:动作空间和对应参数	key_process:当前关键进展	summary:执行完当前步骤后的新历史总结
 verify 必须明确说明上一步是否符合预期；note 要保留当前页面里和任务相关的文字与事实；key_process 要记录已完成和进行中的子任务。
 当 action 为 INFO 时，必须输出具体 value。INFO 不是任务完成，脚本会等待用户远控完成；之后你需要结合新的屏幕截图继续执行。
+整条回复只能包含一个 action 字段。不要在 key_process、summary、note、explain 或其它字段中再次写 action:。如果 explain 或 key_process 表示“下一步/准备/需要继续”，本轮 action 不能是 COMPLETE。
 ]]
 end
 

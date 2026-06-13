@@ -2,6 +2,29 @@ local M = {}
 local UiElement = nil
 local ui_element_loaded = false
 
+local GENERIC_TEXTS = {
+    ["可调控制"] = true,
+    ["调整控制"] = true,
+    ["Page Control"] = true,
+    ["page control"] = true,
+}
+
+local NOISY_TEXTS = {
+    ["清除文本"] = true,
+    ["Clear Text"] = true,
+}
+
+local IGNORED_ROLES = {
+    keyboard_key = true,
+    static_text = true,
+    scrollable = true,
+}
+
+local TOGGLE_STATE_VALUES = {
+    ["0"] = true,
+    ["1"] = true,
+}
+
 local function now_ms()
     if sys and sys.mtime then
         return sys.mtime()
@@ -43,6 +66,8 @@ local function string_value(value)
         return nil
     end
     value = tostring(value)
+    value = string.gsub(value, "^%s+", "")
+    value = string.gsub(value, "%s+$", "")
     if value == "" then
         return nil
     end
@@ -50,17 +75,23 @@ local function string_value(value)
 end
 
 local function traits_text(item)
+    if type(item) ~= "table" then
+        return ""
+    end
     local traits = item and (item.traitsDescription or item.traits or item.traits_description)
     if type(traits) == "table" then
         local parts = {}
-        for _, trait in ipairs(traits) do
-            if trait ~= nil then
-                parts[#parts + 1] = tostring(trait)
+        for _, trait in pairs(traits) do
+            if type(trait) == "string" and trait ~= "" then
+                parts[#parts + 1] = trait
             end
         end
         return table.concat(parts, " ")
     end
-    return tostring(traits or "")
+    if type(traits) == "string" then
+        return traits
+    end
+    return ""
 end
 
 local function has_trait(item, name)
@@ -68,8 +99,17 @@ local function has_trait(item, name)
 end
 
 local function element_role(item)
+    if type(item) ~= "table" then
+        return nil
+    end
     if type(item.role) == "string" and item.role ~= "" then
         return item.role
+    end
+    if item.isToggle or has_trait(item, "Toggle") then
+        return "switch"
+    end
+    if has_trait(item, "LaunchIcon") then
+        return "app_icon"
     end
     if item.hasTextEntry or has_trait(item, "TextEntry") then
         return "text_field"
@@ -98,29 +138,10 @@ local function element_role(item)
     return nil
 end
 
-local function is_single_ascii_key(text)
-    text = tostring(text or "")
-    if #text ~= 1 then
-        return false
-    end
-    local byte = string.byte(text, 1)
-    return byte >= 32 and byte <= 126
-end
-
-local function should_keep(item)
-    local text = string_value(item.text or item.title or item.label)
-    local value = string_value(item.value)
-    local identifier = string_value(item.identifier)
-    if item.hasTextEntry then
-        return true
-    end
-    if item.isKeyboardKey and is_single_ascii_key(text) and not value and not identifier then
-        return false
-    end
-    return text ~= nil or value ~= nil or identifier ~= nil
-end
-
 local function frame_value(item)
+    if type(item) ~= "table" then
+        return nil
+    end
     local x = tonumber(item.x)
     local y = tonumber(item.y)
     local width = tonumber(item.width)
@@ -136,7 +157,81 @@ local function frame_value(item)
     }
 end
 
+local function frame_is_usable(frame, screen_width, screen_height)
+    if not frame or frame.w < 8 or frame.h < 8 then
+        return false
+    end
+    local cx = frame.x + frame.w / 2
+    local cy = frame.y + frame.h / 2
+    return cx >= 0 and cx < screen_width and cy >= 0 and cy < screen_height
+end
+
+local function is_generic_text(text)
+    return GENERIC_TEXTS[tostring(text or "")] == true
+end
+
+local function is_noisy_text(text)
+    return NOISY_TEXTS[tostring(text or "")] == true
+end
+
+local function is_generic_identifier(identifier)
+    identifier = tostring(identifier or "")
+    if identifier == "" or identifier == "0" then
+        return true
+    end
+    return string.find(identifier, "^%d+:%d+$") ~= nil
+end
+
+local function meaningful_value(item, role)
+    if type(item) ~= "table" then
+        return nil
+    end
+    local value = string_value(item.value)
+    if not value then
+        return nil
+    end
+    if role == "app_icon" then
+        return nil
+    end
+    if item.isToggle and TOGGLE_STATE_VALUES[value] then
+        return nil
+    end
+    return value
+end
+
+local function should_keep(item, frame, screen_width, screen_height)
+    if type(item) ~= "table" then
+        return false
+    end
+    if item.isVisible == false then
+        return false
+    end
+    if not frame_is_usable(frame, screen_width, screen_height) then
+        return false
+    end
+
+    local role = element_role(item)
+    local text = string_value(item.text or item.title or item.label)
+    local value = meaningful_value(item, role)
+    if item.hasTextEntry then
+        return true
+    end
+    if IGNORED_ROLES[role] then
+        return false
+    end
+    if role == "adjustable" and is_generic_text(text) then
+        return false
+    end
+    if is_noisy_text(text) then
+        return false
+    end
+    return text ~= nil or value ~= nil
+end
+
 local function center_point(item, frame)
+    if type(item) ~= "table" then
+        return nil
+    end
     local center = item.centerPoint or item.center or item.center_point
     local x = center and tonumber(center.x or center[1])
     local y = center and tonumber(center.y or center[2])
@@ -180,13 +275,17 @@ local function action_box(frame, width, height)
 end
 
 local function slim_element(item, index, width, height)
+    if type(item) ~= "table" then
+        return nil
+    end
     local frame = frame_value(item)
     local center = center_point(item, frame)
+    local role = element_role(item)
     local slim = {
         id = index,
         text = string_value(item.text or item.title or item.label),
-        value = string_value(item.value),
-        role = element_role(item),
+        value = meaningful_value(item, role),
+        role = role,
         point = action_point(center, width, height),
         box = action_box(frame, width, height),
     }
@@ -205,25 +304,37 @@ local function slim_element(item, index, width, height)
     if item.checked ~= nil then
         slim.checked = item.checked and true or false
     end
-    if string_value(item.identifier) then
-        slim.identifier = string_value(item.identifier)
+    local identifier = string_value(item.identifier)
+    if identifier and not is_generic_identifier(identifier) then
+        slim.identifier = identifier
     end
     return slim
 end
 
 local function compact_elements(elements, max_elements, width, height)
     local result = {}
+    local filtered_count = 0
+    local truncated = false
     local source_count = type(elements) == "table" and #elements or 0
     for i = 1, source_count do
         local item = elements[i]
-        if type(item) == "table" and should_keep(item) then
-            result[#result + 1] = slim_element(item, #result + 1, width, height)
-            if #result >= max_elements then
-                break
+        local frame = type(item) == "table" and frame_value(item) or nil
+        if type(item) == "table" and should_keep(item, frame, width, height) then
+            if #result < max_elements then
+                local slim = slim_element(item, #result + 1, width, height)
+                if slim then
+                    result[#result + 1] = slim
+                else
+                    filtered_count = filtered_count + 1
+                end
+            else
+                truncated = true
             end
+        else
+            filtered_count = filtered_count + 1
         end
     end
-    return result, source_count
+    return result, source_count, filtered_count, truncated
 end
 
 function M.capture(config)
@@ -257,22 +368,35 @@ function M.capture(config)
         return nil
     end
 
-    local width, height = screen.size()
-    local slim, source_count = compact_elements(elements, config.ui_element_observation_max_elements, width, height)
+    local size_ok, width, height = pcall(function()
+        return screen.size()
+    end)
+    if not size_ok then
+        return nil
+    end
+    local compact_ok, slim, source_count, filtered_count, truncated = pcall(compact_elements, elements, config.ui_element_observation_max_elements, width, height)
+    if not compact_ok then
+        return nil
+    end
     local payload = {
         coordinate = "all point/box coordinates are 0-1000 action coordinates",
         count = #slim,
-        source_count = source_count,
-        truncated = source_count > #slim,
+        truncated = truncated,
         elements = slim,
     }
-    local text = json.encode(payload) or "{}"
+    local encode_ok, text = pcall(function()
+        return json.encode(payload)
+    end)
+    if not encode_ok or type(text) ~= "string" or text == "" then
+        return nil
+    end
     text = limit_text(text, config.ui_element_observation_max_chars)
     return {
         json = text,
         count = #slim,
         source_count = source_count,
-        truncated = source_count > #slim or #text >= config.ui_element_observation_max_chars,
+        filtered_count = filtered_count,
+        truncated = truncated or #text >= config.ui_element_observation_max_chars,
         elapsed_ms = elapsed,
     }
 end
@@ -295,6 +419,7 @@ function M.meta(observation)
         enabled = true,
         count = observation.count,
         source_count = observation.source_count,
+        filtered_count = observation.filtered_count,
         truncated = observation.truncated,
         elapsed_ms = observation.elapsed_ms,
         error = observation.error,

@@ -1,5 +1,125 @@
 local M = {}
 
+local ACTION_TYPES = {
+    "CLICK",
+    "TYPE",
+    "COMPLETE",
+    "WAIT",
+    "AWAKE",
+    "OPENURL",
+    "INFO",
+    "ABORT",
+    "SLIDE",
+    "SCROLL",
+    "LONGPRESS",
+    "DOUBLECLICK",
+    "LONGPRESS_DRAG",
+    "BACK",
+    "HOME",
+    "ENTER",
+    "HOTKEY",
+}
+
+local ACTION_TYPES_TEXT = table.concat(ACTION_TYPES, "、")
+
+local KNOWN_ACTION_TYPES = {}
+for _, action_type in ipairs(ACTION_TYPES) do
+    KNOWN_ACTION_TYPES[action_type] = true
+end
+
+local ACTION_ALIASES = {
+    SWIPE = "SLIDE",
+    LONG_PRESS = "LONGPRESS",
+    LONG_PRESS_DRAG = "LONGPRESS_DRAG",
+    LONGPRESSANDDRAG = "LONGPRESS_DRAG",
+    INPUT_TEXT = "TYPE",
+    OPEN_URL = "OPENURL",
+    OPEN_LINK = "OPENURL",
+    OPEN = "AWAKE",
+    LAUNCH = "AWAKE",
+    RUN_APP = "AWAKE",
+    OPEN_APP = "AWAKE",
+    DOUBLE_TAP = "DOUBLECLICK",
+    DOUBLE_CLICK = "DOUBLECLICK",
+    HOT_KEY = "HOTKEY",
+    CALL_USER = "INFO",
+}
+
+local POINT_ACTIONS = {
+    CLICK = true,
+    LONGPRESS = true,
+    DOUBLECLICK = true,
+}
+
+local TWO_POINT_ACTIONS = {
+    SLIDE = true,
+    LONGPRESS_DRAG = true,
+}
+
+local COORDINATE_ACTIONS = {
+    CLICK = true,
+    LONGPRESS = true,
+    DOUBLECLICK = true,
+    SLIDE = true,
+    LONGPRESS_DRAG = true,
+}
+
+local VALUE_REQUIRED_ACTIONS = {
+    TYPE = true,
+    AWAKE = true,
+    OPENURL = true,
+}
+
+local TERMINAL_ACTIONS = {
+    WAIT = true,
+    BACK = true,
+    HOME = true,
+    ENTER = true,
+    COMPLETE = true,
+    ABORT = true,
+}
+
+local ACTION_EXTRA_FIELDS = {
+    CLICK = { "point" },
+    LONGPRESS = { "point" },
+    DOUBLECLICK = { "point" },
+    SLIDE = { "point1", "point2" },
+    LONGPRESS_DRAG = { "point1", "point2" },
+    TYPE = { "value", "text" },
+    AWAKE = { "value" },
+    OPENURL = { "value", "url" },
+    WAIT = { "value", "seconds", "duration" },
+    COMPLETE = { "return", "value" },
+    INFO = { "value", "text" },
+    ABORT = { "value", "text" },
+    HOTKEY = { "key", "value" },
+    SCROLL = { "direction", "point" },
+}
+
+local VALID_SCROLL_DIRECTIONS = {
+    up = true,
+    down = true,
+    left = true,
+    right = true,
+}
+
+local SIGNATURE_VALUE_ACTIONS = {
+    AWAKE = true,
+    OPENURL = true,
+    TYPE = true,
+    WAIT = true,
+    HOTKEY = true,
+}
+
+local function normalize_action_type_value(value)
+    local action_type = string.upper(tostring(value or ""))
+    return ACTION_ALIASES[action_type] or action_type
+end
+
+local function has_action_type(map, action_type)
+    return map[normalize_action_type_value(action_type)] == true
+end
+
 local function trim(text)
     text = tostring(text or "")
     return (string.gsub(text, "^%s*(.-)%s*$", "%1"))
@@ -106,37 +226,13 @@ local function first_token(text)
 end
 
 local function space_fallback_keys(action_type)
-    action_type = string.upper(tostring(action_type or ""))
+    action_type = normalize_action_type_value(action_type)
     local keys = { "action_type", "action" }
-    if action_type == "CLICK" or action_type == "LONGPRESS" or action_type == "LONG_PRESS" or action_type == "DOUBLECLICK" or action_type == "DOUBLE_TAP" or action_type == "DOUBLE_CLICK" then
-        add_key(keys, "point")
-    elseif action_type == "SLIDE" or action_type == "SWIPE" or action_type == "LONGPRESS_DRAG" or action_type == "LONG_PRESS_DRAG" or action_type == "LONGPRESSANDDRAG" then
-        add_key(keys, "point1")
-        add_key(keys, "point2")
-    elseif action_type == "TYPE" or action_type == "INPUT_TEXT" then
-        add_key(keys, "value")
-        add_key(keys, "text")
-    elseif action_type == "AWAKE" or action_type == "OPEN" or action_type == "LAUNCH" or action_type == "RUN_APP" or action_type == "OPEN_APP" then
-        add_key(keys, "value")
-    elseif action_type == "OPENURL" or action_type == "OPEN_URL" or action_type == "OPEN_LINK" then
-        add_key(keys, "value")
-        add_key(keys, "url")
-    elseif action_type == "WAIT" then
-        add_key(keys, "value")
-        add_key(keys, "seconds")
-        add_key(keys, "duration")
-    elseif action_type == "COMPLETE" then
-        add_key(keys, "return")
-        add_key(keys, "value")
-    elseif action_type == "INFO" or action_type == "CALL_USER" or action_type == "ABORT" then
-        add_key(keys, "value")
-        add_key(keys, "text")
-    elseif action_type == "HOTKEY" or action_type == "HOT_KEY" then
-        add_key(keys, "key")
-        add_key(keys, "value")
-    elseif action_type == "SCROLL" then
-        add_key(keys, "direction")
-        add_key(keys, "point")
+    local extra_fields = ACTION_EXTRA_FIELDS[action_type]
+    if extra_fields then
+        for _, field_name in ipairs(extra_fields) do
+            add_key(keys, field_name)
+        end
     end
     return keys
 end
@@ -352,27 +448,80 @@ function M.first_non_empty_field(action, ...)
 end
 
 function M.normalize_action_type(value)
-    local action_type = string.upper(tostring(value or ""))
-    if action_type == "SWIPE" then
-        return "SLIDE"
-    elseif action_type == "LONG_PRESS" then
-        return "LONGPRESS"
-    elseif action_type == "LONG_PRESS_DRAG" or action_type == "LONGPRESSANDDRAG" then
-        return "LONGPRESS_DRAG"
-    elseif action_type == "INPUT_TEXT" then
-        return "TYPE"
-    elseif action_type == "OPEN_URL" or action_type == "OPENURL" or action_type == "OPEN_LINK" then
-        return "OPENURL"
-    elseif action_type == "OPEN" or action_type == "LAUNCH" or action_type == "RUN_APP" or action_type == "OPEN_APP" then
-        return "AWAKE"
-    elseif action_type == "DOUBLE_TAP" or action_type == "DOUBLE_CLICK" then
-        return "DOUBLECLICK"
-    elseif action_type == "HOT_KEY" then
-        return "HOTKEY"
-    elseif action_type == "CALL_USER" then
-        return "INFO"
+    return normalize_action_type_value(value)
+end
+
+function M.is_known_action_type(action_type)
+    return has_action_type(KNOWN_ACTION_TYPES, action_type)
+end
+
+function M.is_point_action(action_type)
+    return has_action_type(POINT_ACTIONS, action_type)
+end
+
+function M.is_two_point_action(action_type)
+    return has_action_type(TWO_POINT_ACTIONS, action_type)
+end
+
+function M.is_coordinate_action(action_type)
+    return has_action_type(COORDINATE_ACTIONS, action_type)
+end
+
+function M.uses_value_signature(action_type)
+    return has_action_type(SIGNATURE_VALUE_ACTIONS, action_type)
+end
+
+local function action_type_from_field_value(value)
+    value = trim(value)
+    local embedded = embedded_action_fields(value)
+    local raw_action = embedded and embedded.action or first_token(value)
+    local action_type = M.normalize_action_type(raw_action)
+    if M.is_known_action_type(action_type) then
+        return action_type
     end
-    return action_type
+    return nil
+end
+
+local function action_field_markers(text)
+    text = strip_think(text)
+    local lower = string.lower(text)
+    local markers = {}
+    local pos = 1
+    while pos <= #text do
+        local best_key, best_s, best_e = nil, nil, nil
+        for _, field_name in ipairs({ "action_type", "action" }) do
+            local s, e = find_field_marker(lower, field_name, pos, false)
+            if s and (not best_s or s < best_s) then
+                best_key, best_s, best_e = field_name, s, e
+            end
+        end
+        if not best_s then
+            break
+        end
+        markers[#markers + 1] = { key = best_key, s = best_s, e = best_e }
+        pos = best_e + 1
+    end
+    return markers, text
+end
+
+local function multiple_action_fields_error(model_text)
+    local markers, text = action_field_markers(model_text)
+    local action_types = {}
+    for i, marker in ipairs(markers) do
+        local value_start = marker.e + 1
+        local value_end = #text
+        if markers[i + 1] then
+            value_end = markers[i + 1].s - 1
+        end
+        local action_type = action_type_from_field_value(string.sub(text, value_start, value_end))
+        if action_type then
+            action_types[#action_types + 1] = action_type
+        end
+    end
+    if #action_types <= 1 then
+        return nil
+    end
+    return "multiple action fields: " .. table.concat(action_types, ", ") .. "; output exactly one action field"
 end
 
 function M.point_value(point)
@@ -385,15 +534,6 @@ end
 local function has_point(point)
     local x, y = M.point_value(point)
     return x ~= nil and y ~= nil
-end
-
-local function is_coordinate_action(action_type)
-    action_type = M.normalize_action_type(action_type)
-    return action_type == "CLICK"
-        or action_type == "LONGPRESS"
-        or action_type == "DOUBLECLICK"
-        or action_type == "SLIDE"
-        or action_type == "LONGPRESS_DRAG"
 end
 
 local function raw_has_point_field(text, field_name)
@@ -410,10 +550,10 @@ end
 
 local function raw_has_required_coordinates(model_text, action_type)
     action_type = M.normalize_action_type(action_type)
-    if action_type == "CLICK" or action_type == "LONGPRESS" or action_type == "DOUBLECLICK" then
+    if M.is_point_action(action_type) then
         return raw_has_point_field(model_text, "point")
     end
-    if action_type == "SLIDE" or action_type == "LONGPRESS_DRAG" then
+    if M.is_two_point_action(action_type) then
         return raw_has_point_field(model_text, "point1") and raw_has_point_field(model_text, "point2")
     end
     return true
@@ -421,7 +561,7 @@ end
 
 local function coordinate_missing_detail(model_text, action_type)
     action_type = M.normalize_action_type(action_type)
-    if action_type == "SLIDE" or action_type == "LONGPRESS_DRAG" then
+    if M.is_two_point_action(action_type) then
         local has_point1 = raw_has_point_field(model_text, "point1")
         local has_point2 = raw_has_point_field(model_text, "point2")
         if has_point1 and not has_point2 then
@@ -432,7 +572,7 @@ local function coordinate_missing_detail(model_text, action_type)
         end
         return "missing point1 and point2"
     end
-    if action_type == "CLICK" or action_type == "LONGPRESS" or action_type == "DOUBLECLICK" then
+    if M.is_point_action(action_type) then
         return "missing point"
     end
     return "missing coordinates"
@@ -462,20 +602,20 @@ function M.validate_action(action)
     if action_type == "" then
         return false, "missing action"
     end
-    if action_type == "CLICK" or action_type == "LONGPRESS" or action_type == "DOUBLECLICK" then
+    if M.is_point_action(action_type) then
         if not has_point(M.field(action, "point", "Point")) then
             return false, action_type .. " missing point"
         end
-    elseif action_type == "SLIDE" or action_type == "LONGPRESS_DRAG" then
+    elseif M.is_two_point_action(action_type) then
         if not has_point(M.field(action, "point1", "Point1")) or not has_point(M.field(action, "point2", "Point2")) then
             return false, action_type .. " missing point1/point2"
         end
     elseif action_type == "SCROLL" then
         local direction = string.lower(tostring(M.field(action, "direction", "Direction") or ""))
-        if direction ~= "" and direction ~= "up" and direction ~= "down" and direction ~= "left" and direction ~= "right" then
+        if direction ~= "" and not VALID_SCROLL_DIRECTIONS[direction] then
             return false, "invalid scroll direction"
         end
-    elseif action_type == "TYPE" or action_type == "AWAKE" or action_type == "OPENURL" then
+    elseif VALUE_REQUIRED_ACTIONS[action_type] then
         local value = M.action_value(action)
         if type(value) ~= "string" or value == "" then
             return false, action_type .. " missing value"
@@ -491,7 +631,7 @@ function M.validate_action(action)
             return false, "INFO missing value"
         end
         return true, nil
-    elseif action_type == "WAIT" or action_type == "BACK" or action_type == "HOME" or action_type == "ENTER" or action_type == "COMPLETE" or action_type == "ABORT" then
+    elseif TERMINAL_ACTIONS[action_type] then
         return true, nil
     else
         return false, "unsupported action: " .. action_type
@@ -504,7 +644,7 @@ local function repair_action_format(config, call_text_model, model_text, reason)
 你需要把下面的 GUI Agent 输出修复成脚本可解析的动作格式。不要执行任务，不要补充解释，只输出修复后的动作字段。
 
 要求：
-1. 必须保留一个动作，动作只能是 CLICK、TYPE、COMPLETE、WAIT、AWAKE、OPENURL、INFO、ABORT、SLIDE、SCROLL、LONGPRESS、DOUBLECLICK、LONGPRESS_DRAG、BACK、HOME、ENTER、HOTKEY。
+1. 必须保留一个动作，动作只能是 ]] .. ACTION_TYPES_TEXT .. [[。
 2. 坐标仍然使用 0-1000 的屏幕坐标。
 3. 输出格式为一行或多行 key:value 字段，至少包含 action。
 4. INFO 必须包含具体 value；如果原输出没有足够参数，请把 action 改成 INFO，并在 value 中说明需要人工确认。
@@ -519,6 +659,11 @@ local function repair_action_format(config, call_text_model, model_text, reason)
 end
 
 function M.parse_action_checked(config, call_text_model, model_text)
+    local multi_action_err = multiple_action_fields_error(model_text)
+    if multi_action_err then
+        return nil, multi_action_err, nil
+    end
+
     local action, err = M.parse_action(model_text)
     if action then
         local ok, validate_err = M.validate_action(action)
@@ -527,7 +672,7 @@ function M.parse_action_checked(config, call_text_model, model_text)
         end
         err = validate_err
         local action_type = M.normalize_action_type(M.field(action, "action", "Action", "action_type", "type"))
-        if is_coordinate_action(action_type) and not raw_has_required_coordinates(model_text, action_type) then
+        if M.is_coordinate_action(action_type) and not raw_has_required_coordinates(model_text, action_type) then
             return nil, coordinate_missing_error(action_type, err, model_text), nil
         end
     end

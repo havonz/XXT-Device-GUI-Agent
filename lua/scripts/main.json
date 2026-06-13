@@ -19,6 +19,16 @@
       "visibleRows": 5
     },
     {
+      "type": "RadioGroup",
+      "caption": "每帧提供文本元素列表",
+      "item": [
+        "关闭",
+        "开启"
+      ],
+      "select": 1,
+      "numPerLine": 2
+    },
+    {
       "type": "Edit",
       "caption": "模型接口 URL",
       "text": "http://192.168.11.52:1234/v1/chat/completions",
@@ -237,16 +247,6 @@
     {
       "type": "RadioGroup",
       "caption": "保存每步截图",
-      "item": [
-        "关闭",
-        "开启"
-      ],
-      "select": 1,
-      "numPerLine": 2
-    },
-    {
-      "type": "RadioGroup",
-      "caption": "每帧提供文本元素列表",
       "item": [
         "关闭",
         "开启"

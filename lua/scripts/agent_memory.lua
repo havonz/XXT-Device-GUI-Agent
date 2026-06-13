@@ -2,6 +2,16 @@ local Parser = require("agent_parser")
 
 local M = {}
 
+local CLICK_LOOP_ACTIONS = {
+    CLICK = true,
+    DOUBLECLICK = true,
+}
+
+local SLIDE_LOOP_ACTIONS = {
+    SLIDE = true,
+    SCROLL = true,
+}
+
 function M.new()
     return {
         records = {},
@@ -165,16 +175,16 @@ end
 
 function M.action_signature(action)
     local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
-    if action_type == "CLICK" or action_type == "LONGPRESS" or action_type == "DOUBLECLICK" then
+    if Parser.is_point_action(action_type) then
         return action_type .. ":" .. point_signature(Parser.field(action, "point", "Point"))
     end
-    if action_type == "SLIDE" or action_type == "LONGPRESS_DRAG" then
+    if Parser.is_two_point_action(action_type) then
         return action_type .. ":" .. point_signature(Parser.field(action, "point1", "Point1")) .. ">" .. point_signature(Parser.field(action, "point2", "Point2"))
     end
     if action_type == "SCROLL" then
         return action_type .. ":" .. tostring(Parser.field(action, "direction", "Direction") or "down")
     end
-    if action_type == "AWAKE" or action_type == "OPENURL" or action_type == "TYPE" or action_type == "WAIT" or action_type == "HOTKEY" then
+    if Parser.uses_value_signature(action_type) then
         return action_type .. ":" .. tostring(Parser.action_value(action) or Parser.field(action, "key", "Key") or "")
     end
     return action_type
@@ -194,9 +204,9 @@ function M.detect_repetition(config, memory, action)
     end
 
     local threshold = config.same_action_loop_threshold
-    if action_type == "CLICK" or action_type == "DOUBLECLICK" then
+    if CLICK_LOOP_ACTIONS[action_type] then
         threshold = config.click_loop_threshold
-    elseif action_type == "SLIDE" or action_type == "SCROLL" then
+    elseif SLIDE_LOOP_ACTIONS[action_type] then
         threshold = config.slide_loop_threshold
     end
 

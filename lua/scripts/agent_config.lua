@@ -1,5 +1,23 @@
 local M = {}
 
+local ENABLED_VALUES = {
+    ["开启"] = true,
+    ["是"] = true,
+    ["true"] = true,
+    ["1"] = true,
+    ["on"] = true,
+    ["yes"] = true,
+}
+
+local DISABLED_VALUES = {
+    ["关闭"] = true,
+    ["否"] = true,
+    ["false"] = true,
+    ["0"] = true,
+    ["off"] = true,
+    ["no"] = true,
+}
+
 local function cfg_number(cfg, key, default_value)
     local value = tonumber(cfg[key])
     if value == nil then
@@ -19,10 +37,10 @@ local function enabled_value(value, default_value)
         return value ~= 0
     end
     value = string.lower(tostring(value))
-    if value == "开启" or value == "是" or value == "true" or value == "1" or value == "on" or value == "yes" then
+    if ENABLED_VALUES[value] then
         return true
     end
-    if value == "关闭" or value == "否" or value == "false" or value == "0" or value == "off" or value == "no" then
+    if DISABLED_VALUES[value] then
         return false
     end
     return default_value

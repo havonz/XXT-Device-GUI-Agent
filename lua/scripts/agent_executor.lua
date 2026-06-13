@@ -383,169 +383,235 @@ local function try_sys_input_text(text)
     return false, tostring(err)
 end
 
+local SCROLL_OFFSETS = {
+    down = { dx = 0, dy = -1 },
+    up = { dx = 0, dy = 1 },
+    left = { dx = -1, dy = 0 },
+    right = { dx = 1, dy = 0 },
+}
+
+local HOTKEY_CODES = {
+    HOME = "HOMEBUTTON",
+    HOMEBUTTON = "HOMEBUTTON",
+    ENTER = "RETURN",
+    RETURN = "RETURN",
+    BACKSPACE = "BACKSPACE",
+    DELETE = "BACKSPACE",
+    VOLUMEUP = "VOLUMEUP",
+    VOLUME_UP = "VOLUMEUP",
+    VOLUMEDOWN = "VOLUMEDOWN",
+    VOLUME_DOWN = "VOLUMEDOWN",
+    KEYBOARD = "SHOW_HIDE_KEYBOARD",
+    SHOW_HIDE_KEYBOARD = "SHOW_HIDE_KEYBOARD",
+    POWER = "LOCK",
+    LOCK = "LOCK",
+}
+
+local function unlock_screen_if_needed()
+    if device.is_screen_locked() then
+        device.unlock_screen()
+        sys.msleep(500)
+    end
+end
+
+local function handle_click(ctx, action)
+    local x, y = scale_point(Parser.field(action, "point", "Point"), ctx.width, ctx.height)
+    touch.tap(x, y, 40, 300)
+    return false, { executed = "tap", x = x, y = y }
+end
+
+local function handle_doubleclick(ctx, action)
+    local x, y = scale_point(Parser.field(action, "point", "Point"), ctx.width, ctx.height)
+    touch.tap(x, y, 40, 120)
+    touch.tap(x, y, 40, 300)
+    return false, { executed = "double_tap", x = x, y = y }
+end
+
+local function handle_longpress(ctx, action)
+    local x, y = scale_point(Parser.field(action, "point", "Point"), ctx.width, ctx.height)
+    touch.on(x, y):msleep(1200):off()
+    return false, { executed = "long_press", x = x, y = y }
+end
+
+local function handle_slide(ctx, action)
+    local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), ctx.width, ctx.height)
+    local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), ctx.width, ctx.height)
+    swipe_pixels(x0, y0, x1, y1)
+    return false, { executed = "slide", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
+end
+
+local function handle_longpress_drag(ctx, action)
+    local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), ctx.width, ctx.height)
+    local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), ctx.width, ctx.height)
+    touch.on(1, x0, y0)
+    sys.msleep(900)
+    move_finger_linear(1, x0, y0, x1, y1, 2, 12)
+    sys.msleep(200)
+    touch.off(1, x1, y1)
+    return false, { executed = "long_press_drag", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
+end
+
+local function handle_scroll(ctx, action)
+    local point = Parser.field(action, "point", "Point") or { 500, 500 }
+    local x, y = scale_point(point, ctx.width, ctx.height)
+    local direction = string.lower(tostring(Parser.field(action, "direction", "Direction") or "down"))
+    local offset = SCROLL_OFFSETS[direction]
+    if not offset then
+        return true, { error = "invalid scroll direction: " .. direction }
+    end
+
+    local dx = math.floor(ctx.width * 0.30)
+    local dy = math.floor(ctx.height * 0.30)
+    local x1 = clamp(x + offset.dx * dx, 0, ctx.width - 1)
+    local y1 = clamp(y + offset.dy * dy, 0, ctx.height - 1)
+    swipe_pixels(x, y, x1, y1)
+    return false, { executed = "scroll", direction = direction, x0 = x, y0 = y, x1 = x1, y1 = y1 }
+end
+
+local function handle_type(ctx, action)
+    local point = Parser.field(action, "point", "Point")
+    local text = tostring(Parser.field(action, "value", "Value", "text", "Text") or "")
+    local guard_reason = sensitive_input_reason(action, text)
+    if guard_reason then
+        return request_human_assist(ctx.config, ctx.lcc, {
+            action = "INFO",
+            value = guard_reason,
+            note = Parser.field(action, "note", "Note"),
+            explain = "安全拦截自动输入",
+            summary = Parser.field(action, "summary", "Summary"),
+        }, ctx.image_data_url, ctx.width, ctx.height)
+    end
+
+    local input_ok, execution = try_ui_element_input(text, point, ctx.width, ctx.height)
+    execution.executed = "type"
+    execution.text = text
+    execution.input_ok = input_ok
+
+    if not input_ok and is_ascii(text) then
+        execution.key_input_attempted = true
+        local key_ok, key_err = try_key_send_text(text)
+        execution.key_input_ok = key_ok
+        execution.key_input_error = key_err
+        if key_ok then
+            execution.input_ok = true
+            execution.input_method = "key.send_text"
+            return false, execution
+        end
+    end
+
+    if not execution.input_ok then
+        execution.sys_input_attempted = true
+        local sys_ok, sys_err = try_sys_input_text(text)
+        execution.sys_input_no_error = sys_ok
+        execution.sys_input_error = sys_err
+        execution.sys_input_unverified = sys_ok
+        if sys_ok then
+            execution.input_method = "sys.input_text"
+        end
+    end
+
+    return false, execution
+end
+
+local function handle_awake(_, action)
+    local selected, candidates, err = resolve_app(Parser.field(action, "value", "Value", "app", "App"))
+    if not selected then
+        return false, { error = err, candidates = candidates, recoverable = true, executed = "awake_failed" }
+    end
+    unlock_screen_if_needed()
+    local status = app.run(selected.bundle_id)
+    return false, { executed = "awake", bundle_id = selected.bundle_id, name = selected.name, status = status }
+end
+
+local function handle_openurl(_, action)
+    local url = normalize_url(Parser.action_value(action))
+    if url == "" then
+        return false, { error = "empty url", recoverable = true, executed = "openurl_failed" }
+    end
+    unlock_screen_if_needed()
+    local ok = app.open_url(url)
+    return false, { executed = "openurl", url = url, ok = ok, error = ok and nil or "open_url failed", recoverable = not ok }
+end
+
+local function handle_home()
+    key.press("HOMEBUTTON")
+    return false, { executed = "home" }
+end
+
+local function handle_enter()
+    key.press("RETURN")
+    return false, { executed = "enter" }
+end
+
+local function handle_hotkey(_, action)
+    local key_name = string.upper(tostring(Parser.field(action, "key", "Key", "value", "Value") or ""))
+    local code = HOTKEY_CODES[key_name]
+    if not code then
+        return true, { error = "unsupported hotkey: " .. key_name }
+    end
+    key.press(code)
+    return false, { executed = "hotkey", key = code }
+end
+
+local function handle_back(ctx)
+    local y = math.floor(ctx.height / 2)
+    swipe_pixels(3, y, math.floor(ctx.width * 0.35), y, false)
+    return false, { executed = "back" }
+end
+
+local function handle_wait(_, action)
+    local sec = tonumber(Parser.field(action, "value", "Value", "seconds", "Seconds")) or 2
+    sec = clamp(sec, 0, 300)
+    sys.msleep(math.floor(sec * 1000))
+    return false, { executed = "wait", seconds = sec }
+end
+
+local function handle_complete(_, action)
+    return true, { done = true, reason = "COMPLETE", message = Parser.field(action, "return", "Return", "value", "Value") or "完成" }
+end
+
+local function handle_info(ctx, action)
+    return request_human_assist(ctx.config, ctx.lcc, action, ctx.image_data_url, ctx.width, ctx.height)
+end
+
+local function handle_abort(_, action)
+    return true, { done = true, reason = "ABORT", message = Parser.field(action, "value", "Value") or "无法继续" }
+end
+
+local ACTION_HANDLERS = {
+    CLICK = handle_click,
+    DOUBLECLICK = handle_doubleclick,
+    LONGPRESS = handle_longpress,
+    SLIDE = handle_slide,
+    LONGPRESS_DRAG = handle_longpress_drag,
+    SCROLL = handle_scroll,
+    TYPE = handle_type,
+    AWAKE = handle_awake,
+    OPENURL = handle_openurl,
+    HOME = handle_home,
+    ENTER = handle_enter,
+    HOTKEY = handle_hotkey,
+    BACK = handle_back,
+    WAIT = handle_wait,
+    COMPLETE = handle_complete,
+    INFO = handle_info,
+    ABORT = handle_abort,
+}
+
 function M.execute_action(config, lcc, action, image_data_url)
     local width, height = screen.size()
     local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
-    if action_type == "CLICK" then
-        local x, y = scale_point(Parser.field(action, "point", "Point"), width, height)
-        touch.tap(x, y, 40, 300)
-        return false, { executed = "tap", x = x, y = y }
-    elseif action_type == "DOUBLECLICK" then
-        local x, y = scale_point(Parser.field(action, "point", "Point"), width, height)
-        touch.tap(x, y, 40, 120)
-        touch.tap(x, y, 40, 300)
-        return false, { executed = "double_tap", x = x, y = y }
-    elseif action_type == "LONGPRESS" then
-        local x, y = scale_point(Parser.field(action, "point", "Point"), width, height)
-        touch.on(x, y):msleep(1200):off()
-        return false, { executed = "long_press", x = x, y = y }
-    elseif action_type == "SLIDE" then
-        local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), width, height)
-        local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), width, height)
-        swipe_pixels(x0, y0, x1, y1)
-        return false, { executed = "slide", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
-    elseif action_type == "LONGPRESS_DRAG" then
-        local x0, y0 = scale_point(Parser.field(action, "point1", "Point1"), width, height)
-        local x1, y1 = scale_point(Parser.field(action, "point2", "Point2"), width, height)
-        touch.on(1, x0, y0)
-        sys.msleep(900)
-        move_finger_linear(1, x0, y0, x1, y1, 2, 12)
-        sys.msleep(200)
-        touch.off(1, x1, y1)
-        return false, { executed = "long_press_drag", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
-    elseif action_type == "SCROLL" then
-        local point = Parser.field(action, "point", "Point") or { 500, 500 }
-        local x, y = scale_point(point, width, height)
-        local dx = math.floor(width * 0.30)
-        local dy = math.floor(height * 0.30)
-        local direction = string.lower(tostring(Parser.field(action, "direction", "Direction") or "down"))
-        local x1, y1 = x, y
-        if direction == "down" then
-            y1 = y - dy
-        elseif direction == "up" then
-            y1 = y + dy
-        elseif direction == "left" then
-            x1 = x - dx
-        elseif direction == "right" then
-            x1 = x + dx
-        else
-            return true, { error = "invalid scroll direction: " .. direction }
-        end
-        x1 = clamp(x1, 0, width - 1)
-        y1 = clamp(y1, 0, height - 1)
-        swipe_pixels(x, y, x1, y1)
-        return false, { executed = "scroll", direction = direction, x0 = x, y0 = y, x1 = x1, y1 = y1 }
-    elseif action_type == "TYPE" then
-        local point = Parser.field(action, "point", "Point")
-        local text = tostring(Parser.field(action, "value", "Value", "text", "Text") or "")
-        local guard_reason = sensitive_input_reason(action, text)
-        if guard_reason then
-            return request_human_assist(config, lcc, {
-                action = "INFO",
-                value = guard_reason,
-                note = Parser.field(action, "note", "Note"),
-                explain = "安全拦截自动输入",
-                summary = Parser.field(action, "summary", "Summary"),
-            }, image_data_url, width, height)
-        end
-        local input_ok, execution = try_ui_element_input(text, point, width, height)
-        execution.executed = "type"
-        execution.text = text
-        execution.input_ok = input_ok
-
-        if not input_ok and is_ascii(text) then
-            execution.key_input_attempted = true
-            local key_ok, key_err = try_key_send_text(text)
-            execution.key_input_ok = key_ok
-            execution.key_input_error = key_err
-            if key_ok then
-                execution.input_ok = true
-                execution.input_method = "key.send_text"
-                return false, execution
-            end
-        end
-
-        if not execution.input_ok then
-            execution.sys_input_attempted = true
-            local sys_ok, sys_err = try_sys_input_text(text)
-            execution.sys_input_no_error = sys_ok
-            execution.sys_input_error = sys_err
-            execution.sys_input_unverified = sys_ok
-            if sys_ok then
-                execution.input_method = "sys.input_text"
-            end
-        end
-
-        return false, execution
-    elseif action_type == "AWAKE" then
-        local selected, candidates, err = resolve_app(Parser.field(action, "value", "Value", "app", "App"))
-        if not selected then
-            return false, { error = err, candidates = candidates, recoverable = true, executed = "awake_failed" }
-        end
-        if device.is_screen_locked() then
-            device.unlock_screen()
-            sys.msleep(500)
-        end
-        local status = app.run(selected.bundle_id)
-        return false, { executed = "awake", bundle_id = selected.bundle_id, name = selected.name, status = status }
-    elseif action_type == "OPENURL" then
-        local url = normalize_url(Parser.action_value(action))
-        if url == "" then
-            return false, { error = "empty url", recoverable = true, executed = "openurl_failed" }
-        end
-        if device.is_screen_locked() then
-            device.unlock_screen()
-            sys.msleep(500)
-        end
-        local ok = app.open_url(url)
-        return false, { executed = "openurl", url = url, ok = ok, error = ok and nil or "open_url failed", recoverable = not ok }
-    elseif action_type == "HOME" then
-        key.press("HOMEBUTTON")
-        return false, { executed = "home" }
-    elseif action_type == "ENTER" then
-        key.press("RETURN")
-        return false, { executed = "enter" }
-    elseif action_type == "HOTKEY" then
-        local key_name = string.upper(tostring(Parser.field(action, "key", "Key", "value", "Value") or ""))
-        local key_map = {
-            HOME = "HOMEBUTTON",
-            HOMEBUTTON = "HOMEBUTTON",
-            ENTER = "RETURN",
-            RETURN = "RETURN",
-            BACKSPACE = "BACKSPACE",
-            DELETE = "BACKSPACE",
-            VOLUMEUP = "VOLUMEUP",
-            VOLUME_UP = "VOLUMEUP",
-            VOLUMEDOWN = "VOLUMEDOWN",
-            VOLUME_DOWN = "VOLUMEDOWN",
-            KEYBOARD = "SHOW_HIDE_KEYBOARD",
-            SHOW_HIDE_KEYBOARD = "SHOW_HIDE_KEYBOARD",
-            POWER = "LOCK",
-            LOCK = "LOCK",
-        }
-        local code = key_map[key_name]
-        if not code then
-            return true, { error = "unsupported hotkey: " .. key_name }
-        end
-        key.press(code)
-        return false, { executed = "hotkey", key = code }
-    elseif action_type == "BACK" then
-        local y = math.floor(height / 2)
-        swipe_pixels(3, y, math.floor(width * 0.35), y, false)
-        return false, { executed = "back" }
-    elseif action_type == "WAIT" then
-        local sec = tonumber(Parser.field(action, "value", "Value", "seconds", "Seconds")) or 2
-        sec = clamp(sec, 0, 300)
-        sys.msleep(math.floor(sec * 1000))
-        return false, { executed = "wait", seconds = sec }
-    elseif action_type == "COMPLETE" then
-        return true, { done = true, reason = "COMPLETE", message = Parser.field(action, "return", "Return", "value", "Value") or "完成" }
-    elseif action_type == "INFO" then
-        return request_human_assist(config, lcc, action, image_data_url, width, height)
-    elseif action_type == "ABORT" then
-        return true, { done = true, reason = "ABORT", message = Parser.field(action, "value", "Value") or "无法继续" }
+    local handler = ACTION_HANDLERS[action_type]
+    if not handler then
+        return true, { error = "unsupported action: " .. action_type }
     end
-    return true, { error = "unsupported action: " .. action_type }
+    return handler({
+        config = config,
+        lcc = lcc,
+        image_data_url = image_data_url,
+        width = width,
+        height = height,
+    }, action)
 end
 
 return M
