@@ -1,0 +1,175 @@
+name: Release XXTLCA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package and release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build .xxtlca package
+        id: package
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import zipfile
+          from pathlib import Path
+
+          root = Path(".")
+          main_json = json.loads(Path("lua/scripts/main.json").read_text(encoding="utf-8"))
+          script_info = main_json.get("ScriptInfo", {})
+
+          config = {}
+          config_path = Path(".config")
+          if config_path.exists():
+              config = json.loads(config_path.read_text(encoding="utf-8"))
+
+          def config_info_value(key):
+              for item in config.get("information", []):
+                  if isinstance(item, list) and len(item) >= 2 and item[0] == key:
+                      return item[1]
+              return None
+
+          name = script_info.get("Name") or config.get("bid") or os.environ["GITHUB_REPOSITORY"].split("/")[-1]
+          version = script_info.get("Version") or config_info_value("Version")
+          if not version:
+              raise SystemExit("missing ScriptInfo.Version in lua/scripts/main.json")
+
+          out_dir = Path(os.environ.get("RUNNER_TEMP", ".dist/ci")) / "xxtlca"
+          out_dir.mkdir(parents=True, exist_ok=True)
+          artifact_name = f"{name}-src-{version}.xxtlca"
+          artifact_path = out_dir / artifact_name
+
+          manifest = {
+              "format": "xxtlca",
+              "formatVersion": 1,
+          }
+
+          skipped_files = {
+              "lua/scripts/XXTLanControl.lua",
+              "lua/XXTLanControl.lua",
+              "XXTLanControl.lua",
+          }
+          skipped_names = {
+              ".DS_Store",
+              "README",
+              "README.md",
+              "LICENSE",
+              "LICENSE.md",
+          }
+          skipped_suffixes = {
+              ".markdown",
+              ".md",
+          }
+          ignored_paths = []
+          for ignore_key in ("ignores", "buildIgnores"):
+              for item in config.get(ignore_key, []):
+                  if isinstance(item, str) and item.strip():
+                      ignored_paths.append(item.strip())
+          written_dirs = set()
+
+          def write_output(key, value):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write(f"{key}={value}\n")
+
+          def add_dir(zf, dir_name):
+              dir_name = dir_name.rstrip("/") + "/"
+              if dir_name in written_dirs:
+                  return
+              written_dirs.add(dir_name)
+              info = zipfile.ZipInfo(dir_name, time.localtime()[:6])
+              info.compress_type = zipfile.ZIP_STORED
+              zf.writestr(info, b"")
+
+          def normalize_path(path):
+              normalized = path.replace("\\", "/")
+              while normalized.startswith("./"):
+                  normalized = normalized[2:]
+              return normalized.lstrip("/").rstrip("/")
+
+          def is_config_ignored(path):
+              normalized = normalize_path(path)
+              for ignored_path in ignored_paths:
+                  ignored = normalize_path(ignored_path)
+                  if ignored and (normalized == ignored or normalized.startswith(f"{ignored}/")):
+                      return True
+              return False
+
+          with zipfile.ZipFile(artifact_path, "w", compression=zipfile.ZIP_STORED) as zf:
+              add_dir(zf, ".xxtlca")
+              zf.writestr(
+                  ".xxtlca/manifest.json",
+                  json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              )
+
+              lua_root = root / "lua"
+              add_dir(zf, "lua")
+              for path in sorted(lua_root.rglob("*")):
+                  rel = path.as_posix()
+                  if (
+                      rel in skipped_files
+                      or is_config_ignored(rel)
+                      or path.name in skipped_names
+                      or path.suffix.lower() in skipped_suffixes
+                  ):
+                      continue
+                  if path.is_dir():
+                      add_dir(zf, rel)
+                      continue
+                  zf.write(path, rel)
+
+          write_output("name", name)
+          write_output("version", version)
+          write_output("artifact_name", artifact_name)
+          write_output("artifact_path", artifact_path.as_posix())
+          PY
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="v${{ steps.package.outputs.version }}"
+          name="${{ steps.package.outputs.name }}"
+          version="${{ steps.package.outputs.version }}"
+          artifact="${{ steps.package.outputs.artifact_path }}"
+          notes_file="${RUNNER_TEMP:-.}/release-notes.md"
+
+          previous_tag="$(git tag --list 'v*' --sort=-v:refname | awk -v current="$tag" '$0 != current { print; exit }')"
+          if [ -n "$previous_tag" ]; then
+            changelog_url="https://github.com/${GITHUB_REPOSITORY}/compare/${previous_tag}...${tag}"
+          else
+            changelog_url="https://github.com/${GITHUB_REPOSITORY}/commits/${tag}"
+          fi
+
+          {
+            echo "Automated release for $GITHUB_SHA."
+            echo
+            echo "Full Changelog: $changelog_url"
+          } > "$notes_file"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file "$notes_file"
+            gh release upload "$tag" "$artifact" --clobber
+          else
+            gh release create "$tag" "$artifact" \
+              --target "$GITHUB_SHA" \
+              --title "$name $version" \
+              --notes-file "$notes_file"
+          fi
