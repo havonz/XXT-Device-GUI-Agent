@@ -1,5 +1,6 @@
 local Parser = require("agent_parser")
 local Ui = require("agent_ui")
+local UiElement = require("ui_element")
 
 local M = {}
 
@@ -293,6 +294,77 @@ local function request_human_assist(config, lcc, action, image_data_url, width, 
     }
 end
 
+local function ui_element_input_text(target, text)
+    local ok, result, err = pcall(function()
+        return UiElement.input_text(target, text)
+    end)
+    if not ok then
+        return nil, tostring(result)
+    end
+    if result then
+        return true, nil
+    end
+    return nil, tostring(err or "input failed")
+end
+
+local function try_ui_element_input(text, point, width, height)
+    local result = {
+        ui_input_attempted = true,
+        ui_input_ok = false,
+    }
+
+    if point then
+        local x, y = scale_point(point, width, height)
+        result.x = x
+        result.y = y
+
+        local ok, input_err = ui_element_input_text({ x = x, y = y }, text)
+        if ok then
+            result.ui_input_ok = true
+            result.input_method = "ui_element.input_text_at_point"
+            return true, result
+        else
+            result.ui_input_error = input_err
+        end
+
+        touch.tap(x, y, 40, 500)
+        return false, result
+    end
+
+    local ok, input_err = ui_element_input_text({
+        role = "text_field",
+        hittable = true,
+    }, text)
+    if ok then
+        result.ui_input_ok = true
+        result.input_method = "ui_element.input_text"
+        return true, result
+    end
+
+    result.ui_input_error = input_err
+    return false, result
+end
+
+local function try_key_send_text(text)
+    local ok, err = pcall(function()
+        key.send_text(text)
+    end)
+    if ok then
+        return true, nil
+    end
+    return false, tostring(err)
+end
+
+local function try_sys_input_text(text)
+    local ok, err = pcall(function()
+        sys.input_text(text, false)
+    end)
+    if ok then
+        return true, nil
+    end
+    return false, tostring(err)
+end
+
 function M.execute_action(config, lcc, action, image_data_url)
     local width, height = screen.size()
     local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
@@ -358,19 +430,35 @@ function M.execute_action(config, lcc, action, image_data_url)
                 summary = Parser.field(action, "summary", "Summary"),
             }, image_data_url, width, height)
         end
-        if point then
-            local x, y = scale_point(point, width, height)
-            touch.tap(x, y, 40, 500)
+        local input_ok, execution = try_ui_element_input(text, point, width, height)
+        execution.executed = "type"
+        execution.text = text
+        execution.input_ok = input_ok
+
+        if not input_ok and is_ascii(text) then
+            execution.key_input_attempted = true
+            local key_ok, key_err = try_key_send_text(text)
+            execution.key_input_ok = key_ok
+            execution.key_input_error = key_err
+            if key_ok then
+                execution.input_ok = true
+                execution.input_method = "key.send_text"
+                return false, execution
+            end
         end
-        local ok = pcall(function()
-            sys.input_text(text, false)
-        end)
-        if not ok and is_ascii(text) then
-            pcall(function()
-                key.send_text(text)
-            end)
+
+        if not execution.input_ok then
+            execution.sys_input_attempted = true
+            local sys_ok, sys_err = try_sys_input_text(text)
+            execution.sys_input_no_error = sys_ok
+            execution.sys_input_error = sys_err
+            execution.sys_input_unverified = sys_ok
+            if sys_ok then
+                execution.input_method = "sys.input_text"
+            end
         end
-        return false, { executed = "type", text = text, input_ok = ok }
+
+        return false, execution
     elseif action_type == "AWAKE" then
         local selected, candidates, err = resolve_app(Parser.field(action, "value", "Value", "app", "App"))
         if not selected then
