@@ -118,6 +118,9 @@ local function space_fallback_keys(action_type)
         add_key(keys, "text")
     elseif action_type == "AWAKE" or action_type == "OPEN" or action_type == "LAUNCH" or action_type == "RUN_APP" or action_type == "OPEN_APP" then
         add_key(keys, "value")
+    elseif action_type == "OPENURL" or action_type == "OPEN_URL" or action_type == "OPEN_LINK" then
+        add_key(keys, "value")
+        add_key(keys, "url")
     elseif action_type == "WAIT" then
         add_key(keys, "value")
         add_key(keys, "seconds")
@@ -186,7 +189,8 @@ local function embedded_action_fields(raw_action)
         point = parse_jsonish_point_field(raw_action, { "point", "Point" }),
         point1 = parse_jsonish_point_field(raw_action, { "point1", "Point1" }),
         point2 = parse_jsonish_point_field(raw_action, { "point2", "Point2" }),
-        value = parse_jsonish_string_field(raw_action, { "value", "Value", "text", "Text" }),
+        value = parse_jsonish_string_field(raw_action, { "value", "Value", "text", "Text", "url", "URL" }),
+        url = parse_jsonish_string_field(raw_action, { "url", "URL" }),
         ["return"] = parse_jsonish_string_field(raw_action, { "return", "Return" }),
         direction = parse_jsonish_string_field(raw_action, { "direction", "Direction" }),
         key = parse_jsonish_string_field(raw_action, { "key", "Key" }),
@@ -231,7 +235,8 @@ local function action_from_fields(fields)
         explain = fields.explain,
         summary = fields.summary,
         key_process = fields.key_process,
-        value = fields.value or fields.text,
+        value = fields.value or fields.text or fields.url,
+        url = fields.url,
         request_type = fields.request_type or fields.assist_type or fields.mode or fields.kind,
         ["return"] = fields["return"],
         direction = fields.direction,
@@ -356,6 +361,8 @@ function M.normalize_action_type(value)
         return "LONGPRESS_DRAG"
     elseif action_type == "INPUT_TEXT" then
         return "TYPE"
+    elseif action_type == "OPEN_URL" or action_type == "OPENURL" or action_type == "OPEN_LINK" then
+        return "OPENURL"
     elseif action_type == "OPEN" or action_type == "LAUNCH" or action_type == "RUN_APP" or action_type == "OPEN_APP" then
         return "AWAKE"
     elseif action_type == "DOUBLE_TAP" or action_type == "DOUBLE_CLICK" then
@@ -436,7 +443,7 @@ local function coordinate_missing_error(action_type, err, model_text)
 end
 
 function M.action_value(action)
-    return M.field(action, "value", "Value", "text", "Text")
+    return M.field(action, "value", "Value", "text", "Text", "url", "URL")
 end
 
 function M.is_coordinate_missing_error(err)
@@ -468,7 +475,7 @@ function M.validate_action(action)
         if direction ~= "" and direction ~= "up" and direction ~= "down" and direction ~= "left" and direction ~= "right" then
             return false, "invalid scroll direction"
         end
-    elseif action_type == "TYPE" or action_type == "AWAKE" then
+    elseif action_type == "TYPE" or action_type == "AWAKE" or action_type == "OPENURL" then
         local value = M.action_value(action)
         if type(value) ~= "string" or value == "" then
             return false, action_type .. " missing value"
@@ -497,7 +504,7 @@ local function repair_action_format(config, call_text_model, model_text, reason)
 你需要把下面的 GUI Agent 输出修复成脚本可解析的动作格式。不要执行任务，不要补充解释，只输出修复后的动作字段。
 
 要求：
-1. 必须保留一个动作，动作只能是 CLICK、TYPE、COMPLETE、WAIT、AWAKE、INFO、ABORT、SLIDE、SCROLL、LONGPRESS、DOUBLECLICK、LONGPRESS_DRAG、BACK、HOME、ENTER、HOTKEY。
+1. 必须保留一个动作，动作只能是 CLICK、TYPE、COMPLETE、WAIT、AWAKE、OPENURL、INFO、ABORT、SLIDE、SCROLL、LONGPRESS、DOUBLECLICK、LONGPRESS_DRAG、BACK、HOME、ENTER、HOTKEY。
 2. 坐标仍然使用 0-1000 的屏幕坐标。
 3. 输出格式为一行或多行 key:value 字段，至少包含 action。
 4. INFO 必须包含具体 value；如果原输出没有足够参数，请把 action 改成 INFO，并在 value 中说明需要人工确认。

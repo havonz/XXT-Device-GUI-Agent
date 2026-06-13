@@ -40,6 +40,24 @@ local function norm(text)
     return text
 end
 
+local function trim_text(text)
+    text = tostring(text or "")
+    text = string.gsub(text, "^%s+", "")
+    text = string.gsub(text, "%s+$", "")
+    return text
+end
+
+local function normalize_url(url)
+    url = trim_text(url)
+    if url == "" then
+        return ""
+    end
+    if not string.find(url, "^[%w][%w+.-]*:") then
+        url = "https://" .. url
+    end
+    return url
+end
+
 local function resolve_app(app_name)
     local target = norm(app_name)
     if target == "" then
@@ -470,6 +488,17 @@ function M.execute_action(config, lcc, action, image_data_url)
         end
         local status = app.run(selected.bundle_id)
         return false, { executed = "awake", bundle_id = selected.bundle_id, name = selected.name, status = status }
+    elseif action_type == "OPENURL" then
+        local url = normalize_url(Parser.action_value(action))
+        if url == "" then
+            return false, { error = "empty url", recoverable = true, executed = "openurl_failed" }
+        end
+        if device.is_screen_locked() then
+            device.unlock_screen()
+            sys.msleep(500)
+        end
+        local ok = app.open_url(url)
+        return false, { executed = "openurl", url = url, ok = ok, error = ok and nil or "open_url failed", recoverable = not ok }
     elseif action_type == "HOME" then
         key.press("HOMEBUTTON")
         return false, { executed = "home" }

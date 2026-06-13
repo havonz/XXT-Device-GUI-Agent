@@ -5,6 +5,7 @@ local Config = require("agent_config")
 local Executor = require("agent_executor")
 local Memory = require("agent_memory")
 local Model = require("agent_model")
+local Observation = require("agent_observation")
 local Parser = require("agent_parser")
 local Ui = require("agent_ui")
 
@@ -51,7 +52,7 @@ local function call_text_model(text, max_tokens)
     return Model.call_text_model(CONFIG, text, max_tokens)
 end
 
-local function append_step_log(step, model_text, repaired_text, screenshot_path, action, original_action, execution)
+local function append_step_log(step, model_text, repaired_text, screenshot_path, observation_meta, action, original_action, execution)
     Config.append_log(CONFIG, {
         time = Config.now_ms(),
         type = "step",
@@ -61,6 +62,7 @@ local function append_step_log(step, model_text, repaired_text, screenshot_path,
         model_response = model_text,
         repaired_response = repaired_text,
         screenshot = screenshot_path,
+        observation = observation_meta,
         execution = execution,
     })
 end
@@ -168,7 +170,15 @@ local function write_session_start()
         parse_context_reset_count = CONFIG.parse_context_reset_count,
         coordinate_retry_count = CONFIG.coordinate_retry_count,
         enable_state_compression = CONFIG.enable_state_compression,
+        enable_ui_element_observation = CONFIG.enable_ui_element_observation,
+        ui_element_observation_max_elements = CONFIG.ui_element_observation_max_elements,
     })
+end
+
+local function capture_frame(step)
+    local image_data_url, screenshot_path = Executor.capture_image_data_url(CONFIG, step)
+    local observation = Observation.capture(CONFIG)
+    return image_data_url, screenshot_path, Observation.to_prompt(observation), Observation.meta(observation)
 end
 
 local function compress_if_needed(step, memory)
@@ -188,7 +198,7 @@ local function compress_if_needed(step, memory)
 end
 
 local function run_step(step, memory)
-    local image_data_url, screenshot_path = Executor.capture_image_data_url(CONFIG, step)
+    local image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(step)
     local history = Memory.build_history(CONFIG, memory)
 
     local model_text, repaired_text, action, parse_err
@@ -202,7 +212,7 @@ local function run_step(step, memory)
     for model_call_index = 1, max_recovery_model_calls do
         local model_err
         local active_history = use_parse_reset_history and parse_retry_history() or history
-        model_text, model_err = Model.call_model(CONFIG, image_data_url, active_history, retry_instruction)
+        model_text, model_err = Model.call_model(CONFIG, image_data_url, active_history, retry_instruction, observation_prompt)
         if model_err then
             Config.append_log(CONFIG, { time = Config.now_ms(), type = "error", step = step, error = model_err })
             Ui.toast("Model error")
@@ -243,7 +253,7 @@ local function run_step(step, memory)
                 repaired_response = repaired_text,
                 error = parse_err,
             })
-            image_data_url, screenshot_path = Executor.capture_image_data_url(CONFIG, tostring(step) .. "_parse_" .. tostring(consecutive_parse_error_count))
+            image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(tostring(step) .. "_parse_" .. tostring(consecutive_parse_error_count))
             retry_instruction = parse_retry_instruction(parse_err, model_text, consecutive_parse_error_count, use_parse_reset_history)
             sys.msleep(300)
         else
@@ -282,7 +292,7 @@ local function run_step(step, memory)
                 error = parse_err,
                 model_response = model_text,
             })
-            image_data_url, screenshot_path = Executor.capture_image_data_url(CONFIG, tostring(step) .. "_coordinate_" .. tostring(total_coordinate_retries))
+            image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(tostring(step) .. "_coordinate_" .. tostring(total_coordinate_retries))
             retry_instruction = coordinate_retry_instruction(parse_err, model_text, consecutive_missing_count, missing_action_type)
             sys.msleep(300)
         end
@@ -314,7 +324,7 @@ local function run_step(step, memory)
     }
 
     memory.records[#memory.records + 1] = record
-    append_step_log(step, model_text, repaired_text, screenshot_path, action, original_action, execution)
+    append_step_log(step, model_text, repaired_text, screenshot_path, observation_meta, action, original_action, execution)
 
     if should_stop then
         notify_user(execution.message or execution.error or execution.reason or "Stopped")

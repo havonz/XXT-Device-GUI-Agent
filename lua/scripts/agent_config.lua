@@ -89,6 +89,14 @@ function M.normalize(config)
     if config.state_compression_max_chars < 500 then
         config.state_compression_max_chars = 500
     end
+    config.ui_element_observation_max_elements = tonumber(config.ui_element_observation_max_elements) or 80
+    config.ui_element_observation_max_chars = tonumber(config.ui_element_observation_max_chars) or 12000
+    if config.ui_element_observation_max_elements < 1 then
+        config.ui_element_observation_max_elements = 1
+    end
+    if config.ui_element_observation_max_chars < 1000 then
+        config.ui_element_observation_max_chars = 1000
+    end
 end
 
 function M.from_ui(cfg)
@@ -115,6 +123,9 @@ function M.from_ui(cfg)
         state_compression_recent_window = cfg_number(cfg, "压缩保留最近步数", 6),
         state_compression_max_chars = cfg_number(cfg, "压缩状态最大字符数", 3000),
         save_screenshots = cfg_enabled(cfg, "保存每步截图", false),
+        enable_ui_element_observation = cfg_enabled(cfg, "每帧提供文本元素列表", false),
+        ui_element_observation_max_elements = 80,
+        ui_element_observation_max_chars = 12000,
         click_loop_threshold = 3,
         slide_loop_threshold = 5,
         same_action_loop_threshold = 4,
@@ -173,6 +184,9 @@ function M.merge_launch_args(config)
     end
     if args.enable_state_compression ~= nil then
         config.enable_state_compression = enabled_value(args.enable_state_compression, config.enable_state_compression)
+    end
+    if args.enable_ui_element_observation ~= nil then
+        config.enable_ui_element_observation = enabled_value(args.enable_ui_element_observation, config.enable_ui_element_observation)
     end
     M.normalize(config)
 end

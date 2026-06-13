@@ -12,6 +12,10 @@ function M.system_prompt()
 4. 遇到无法决策的情况时，优先使用 INFO 请求用户提供必要的信息或远控协助，不要盲目猜测或冒险尝试可能错误的操作。
 5. 不能输入任何手机号码、电话号码、身份证号、短信验证码、邮件验证码。遇到以上情况，必须使用 INFO 请求用户远控协助。
 6. 当用户目标是打开某个已知 App，或当前需要进入某个已知 App 时，优先使用 AWAKE 并填写 App 名称；不要先回到主屏幕翻页找图标。只有 AWAKE 失败、应用名不明确或必须处理当前屏幕阻挡时，才考虑 HOME、SLIDE 或 CLICK。
+7. 在地址栏、搜索框、聊天输入框中 TYPE 完网址、搜索词或消息后，如果下一步需要触发键盘上的“前往”“搜索”“发送”“Return”等提交动作，优先使用 ENTER；不要用 CLICK 猜测键盘右下角按钮坐标。
+8. Safari 地址栏或搜索框中已有选中文本时，直接 TYPE 新内容即可覆盖；不要反复点击右侧清除按钮，除非截图清楚显示必须先清除。
+9. 当用户明确要求打开某个网址、URL 或链接时，优先使用 OPENURL 直接打开，不要手动打开浏览器、点击地址栏、TYPE 网址再 ENTER。
+10. 如果本轮提供了结构化文本元素列表，它只对应当前截图，下一次动作后会过期；不要把完整元素 JSON 复制进 note、summary、key_process 或历史总结。
 
 # Action Space:
 1. CLICK：点击手机屏幕坐标，需包含点击的坐标位置 point。例如：action:CLICK	point:x,y
@@ -25,10 +29,11 @@ function M.system_prompt()
 9. LONGPRESS：长按手机屏幕坐标，需包含 point。例如：action:LONGPRESS	point:x,y
 10. BACK：返回上一页。
 11. HOME：回到桌面。
-12. ENTER：按回车/搜索/发送键。
+12. ENTER：按回车/搜索/发送键。输入网址、搜索词或消息后需要提交时，优先使用 ENTER，不要点击键盘“前往/搜索/发送”按钮坐标。
 13. DOUBLECLICK：双击屏幕坐标，需包含 point。例如：action:DOUBLECLICK	point:x,y
 14. HOTKEY：按指定按键，需包含 key，支持 RETURN、BACKSPACE、VOLUMEUP、VOLUMEDOWN、SHOW_HIDE_KEYBOARD、LOCK。例如：action:HOTKEY	key:BACKSPACE
 15. LONGPRESS_DRAG：长按后拖拽，需包含 point1 和 point2。例如：action:LONGPRESS_DRAG	point1:x1,y1	point2:x2,y2
+16. OPENURL：打开指定网址或 URL Scheme，需包含 value 或 url。例如：action:OPENURL	value:https://www.google.com
 
 输出格式必须是：
 <THINK> 思考的内容 </THINK>
@@ -135,12 +140,15 @@ function M.call_text_model(config, text, max_tokens)
     return post_chat(config, payload, config.request_timeout)
 end
 
-function M.call_model(config, image_data_url, history, retry_instruction)
+function M.call_model(config, image_data_url, history, retry_instruction, element_observation)
     local content = {
         { type = "text", text = M.system_prompt() },
         { type = "text", text = M.user_prompt(config.task, history) },
         { type = "image_url", image_url = { url = image_data_url } },
     }
+    if type(element_observation) == "string" and element_observation ~= "" then
+        content[#content + 1] = { type = "text", text = element_observation }
+    end
     if type(retry_instruction) == "string" and retry_instruction ~= "" then
         content[#content + 1] = { type = "text", text = retry_instruction }
     end

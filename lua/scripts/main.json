@@ -1,7 +1,7 @@
 {
   "ScriptInfo": {
     "Name": "XXT-Device-GUI-Agent",
-    "Version": "0.0.1",
+    "Version": "0.0.2",
     "Developer": "havonz",
     "Instructions": "使用 XXTouch 脚本实现的基于外部视觉模型设备日常界面操作 Agent"
   },
@@ -237,6 +237,16 @@
     {
       "type": "RadioGroup",
       "caption": "保存每步截图",
+      "item": [
+        "关闭",
+        "开启"
+      ],
+      "select": 1,
+      "numPerLine": 2
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "每帧提供文本元素列表",
       "item": [
         "关闭",
         "开启"

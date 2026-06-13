@@ -9,6 +9,35 @@ function M.new()
     }
 end
 
+local function limit_text(text, max_chars)
+    text = tostring(text or "")
+    if #text <= max_chars then
+        return text
+    end
+    local index = 1
+    local last = 0
+    while index <= #text and last < max_chars do
+        local byte = string.byte(text, index)
+        local size = 1
+        if byte >= 240 then
+            size = 4
+        elseif byte >= 224 then
+            size = 3
+        elseif byte >= 192 then
+            size = 2
+        end
+        if last + size > max_chars then
+            break
+        end
+        last = last + size
+        index = index + size
+    end
+    if last == 0 then
+        return ""
+    end
+    return string.sub(text, 1, last)
+end
+
 local function text_field(action, key)
     local value = action and action[key]
     if value == nil then
@@ -18,11 +47,26 @@ local function text_field(action, key)
     if value == "" then
         return "none"
     end
-    return value
+    return limit_text(value, 800)
+end
+
+local function sanitized_action(action)
+    if type(action) ~= "table" then
+        return {}
+    end
+    local result = {}
+    for key, value in pairs(action) do
+        if type(value) == "string" then
+            result[key] = limit_text(value, 800)
+        else
+            result[key] = value
+        end
+    end
+    return result
 end
 
 local function action_to_json(action)
-    return json.encode(action or {}) or "{}"
+    return json.encode(sanitized_action(action)) or "{}"
 end
 
 function M.record_to_history(record)
@@ -65,35 +109,6 @@ function M.build_history(config, memory)
         return "暂无历史操作"
     end
     return table.concat(parts, "\n\n")
-end
-
-local function limit_text(text, max_chars)
-    text = tostring(text or "")
-    if #text <= max_chars then
-        return text
-    end
-    local index = 1
-    local last = 0
-    while index <= #text and last < max_chars do
-        local byte = string.byte(text, index)
-        local size = 1
-        if byte >= 240 then
-            size = 4
-        elseif byte >= 224 then
-            size = 3
-        elseif byte >= 192 then
-            size = 2
-        end
-        if last + size > max_chars then
-            break
-        end
-        last = last + size
-        index = index + size
-    end
-    if last == 0 then
-        return ""
-    end
-    return string.sub(text, 1, last)
 end
 
 function M.compress(config, memory, call_text_model)
@@ -159,7 +174,7 @@ function M.action_signature(action)
     if action_type == "SCROLL" then
         return action_type .. ":" .. tostring(Parser.field(action, "direction", "Direction") or "down")
     end
-    if action_type == "AWAKE" or action_type == "TYPE" or action_type == "WAIT" or action_type == "HOTKEY" then
+    if action_type == "AWAKE" or action_type == "OPENURL" or action_type == "TYPE" or action_type == "WAIT" or action_type == "HOTKEY" then
         return action_type .. ":" .. tostring(Parser.action_value(action) or Parser.field(action, "key", "Key") or "")
     end
     return action_type
