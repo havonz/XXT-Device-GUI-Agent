@@ -108,8 +108,15 @@ local PARSE_RESET_HISTORY = "已清空历史上下文。前文可能干扰了动
 
 local function parse_retry_instruction(parse_err, model_text, retry_index, context_reset)
     local reset_text = ""
+    local previous_output_text = [[
+
+上一次原始输出：
+]] .. tostring(model_text or "")
     if context_reset then
-        reset_text = "\n已清空历史上下文，本次只保留用户目标和当前截图。"
+        reset_text = "\n已清空历史上下文，本次只保留用户目标和当前截图。不要复述历史步骤、上一次输出、[STEP]、screen_after_action、execution_result 或“当前手机屏幕截图如下”。"
+        previous_output_text = [[
+
+本次已不再提供上一次原始输出；它可能已经污染格式。请只根据当前截图和用户目标重新输出当前这一步。]]
     end
     return [[
 上一次输出无法解析，原因：]] .. tostring(parse_err or "解析失败") .. [[
@@ -125,9 +132,7 @@ local function parse_retry_instruction(parse_err, model_text, retry_index, conte
 - 如果当前页面需要人工处理，输出 action:INFO 并给出具体 value。
 
 这是第 ]] .. tostring(retry_index) .. [[ 次解析失败后的重问。
-
-上一次原始输出：
-]] .. tostring(model_text or "")
+]] .. previous_output_text
 end
 
 local function parse_retry_failed_action(parse_err, retry_count)
@@ -155,7 +160,7 @@ end
 local function bad_action_retry_instruction(reason, action, retry_index)
     local extra = ""
     if clicked_lower_screen(action) then
-        extra = "\n- 这个错误动作点在列表主体区域，可能点到了目标之外的其它列表项。返回列表后如果目标文字不可见，不要再猜测点击其它行；优先查看上方内容：使用 action:SLIDE\tpoint1:500,250\tpoint2:500,850。"
+        extra = "\n- 这个错误动作点在列表主体区域，可能点到了目标之外的其它列表项。返回列表后如果目标文字不可见，不要再猜测点击其它行；应根据当前截图和历史中已验证无效的滑动方向，改用还没有被证明无效的 SLIDE 方向继续探索。"
     end
     return [[
 候选动作被错误记忆拦截，不能执行。
@@ -183,19 +188,21 @@ local function bad_action_retry_failed_action(config, memory, reason, action, re
                 action = "SLIDE",
                 point1 = { x2, y2 },
                 point2 = { x1, y1 },
+                auto_recovery = "bad_slide_reverse",
                 verify = "候选滑动方向已经被错误记忆拦截，改用反方向验证。",
                 note = "不再重复同方向滑动，改用反方向继续探索。",
                 explain = "模型多次重复已知错误滑动，自动换成反方向 SLIDE。",
                 key_process = "反方向滑动验证可滚动区域",
                 summary = "因已知错误滑动重复，改用反方向 SLIDE。原因：" .. tostring(reason or "错误动作重复"),
             }
-            if not Memory.would_repeat_ineffective_action(config, memory, reversed) then
+            local known_bad = Memory.detect_bad_action_reuse(config, memory, reversed)
+            if not known_bad and not Memory.would_repeat_ineffective_action(config, memory, reversed) then
                 return reversed
             end
         end
     end
     if Policy.task_requests_search(config) and action_type ~= "SLIDE" then
-        return fallback_search_slide_action("模型多次提出已知错误点击；当前目标不可见时不应继续猜点，改为查看上方列表内容。原原因：" .. tostring(reason or "错误动作重复"), config, memory, "up")
+        return fallback_search_slide_action("模型多次提出已知错误点击；当前目标不可见时不应继续猜点，改为按未验证无效的方向滑动探索。原原因：" .. tostring(reason or "错误动作重复"), config, memory)
     end
     local value = "模型连续 " .. tostring(retry_count) .. " 次提出已知错误动作。为避免重复进入错误页面，请人工确认当前页面后点击完成。原因：" .. tostring(reason or "错误动作重复")
     return {
@@ -230,10 +237,63 @@ local function click_hits_unrelated_visible_text(config, action, observation)
     if not text or text == "" then
         return nil
     end
+    local action_text = Policy.action_text(action)
+    if string.find(action_text, text, 1, true) then
+        return nil
+    end
+    if text == "搜索栏" and (string.find(action_text, "搜索", 1, true) or string.find(action_text, "搜索框", 1, true)) then
+        return nil
+    end
     if Policy.task_contains_visible_text(config, text) then
         return nil
     end
     return "候选点击命中了当前可见文本“" .. text .. "”，但用户任务中没有这个目标；这很可能是在列表中猜点点到了无关条目。应先 SLIDE 查找任务中明确出现的目标文字。"
+end
+
+local POINT_ACTION_TYPES = {
+    CLICK = true,
+    DOUBLECLICK = true,
+    LONGPRESS = true,
+}
+
+local function visible_navigation_target_action(config, action, observation)
+    if not Policy.task_requests_search(config) then
+        return nil
+    end
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type == "COMPLETE" or action_type == "INFO" or action_type == "ABORT" or action_type == "BACK" then
+        return nil
+    end
+    if action_type ~= "SLIDE" and not POINT_ACTION_TYPES[action_type] then
+        return nil
+    end
+
+    local targets = Policy.task_navigation_targets(config)
+    local target = Observation.find_visible_text_target(observation, targets, {
+        skip_top_navigation = true,
+        skip_first_top_title = true,
+    })
+    if not target then
+        return nil
+    end
+
+    if POINT_ACTION_TYPES[action_type] then
+        local x, y = Parser.point_value(Parser.field(action, "point", "Point"))
+        local clicked_text = x and y and Observation.text_at_point(observation, x, y) or nil
+        if clicked_text == target.text then
+            return nil
+        end
+    end
+
+    return {
+        action = "CLICK",
+        point = { target.point[1], target.point[2] },
+        verify = "任务路径目标“" .. tostring(target.text) .. "”当前已经在结构化元素列表中可见，应直接点击该项。",
+        note = "点击当前可见的任务路径目标“" .. tostring(target.text) .. "”。",
+        explain = "模型候选动作没有命中已可见的路径目标，自动改为点击该目标。",
+        key_process = "点击可见路径目标",
+        summary = "当前可见任务路径目标“" .. tostring(target.text) .. "”，优先点击而不是继续滑动或猜点。",
+    }, target
 end
 
 local function search_exploration_reason(config, memory, model_text, action)
@@ -295,7 +355,7 @@ local function premature_info_reason(config, memory, action)
     if slides >= threshold then
         return nil
     end
-    return "当前任务是查找信息，候选 INFO 只是因为当前可视区域未找到目标；最近仅连续滑动 " .. tostring(slides) .. " 次，未达到查找阈值 " .. tostring(threshold) .. " 次。应继续向下滑动查找，而不是询问用户。"
+    return "当前任务是查找信息，候选 INFO 只是因为当前可视区域未找到目标；最近仅连续滑动 " .. tostring(slides) .. " 次，未达到查找阈值 " .. tostring(threshold) .. " 次。应继续用未被证明无效的滑动方向查找，而不是询问用户。"
 end
 
 local function premature_info_retry_instruction(reason, retry_index)
@@ -305,7 +365,7 @@ local function premature_info_retry_instruction(reason, retry_index)
 
 请重新观察当前截图并继续完成任务：
 - 如果目标文字或结果当前可见，点击或 COMPLETE。
-- 如果目标仍不可见，继续使用 SLIDE 向下查找。
+- 如果目标仍不可见，继续使用还没有被证明无效的 SLIDE 方向查找；如果刚才同方向滑动后界面没有变化，再换反方向或改变滑动幅度。
 - “当前可视区域未找到”不等于任务失败；列表可能需要翻多页。
 - 只有已经到达列表底部、连续多次滑动无变化、遇到敏感输入/登录/验证码，才使用 INFO。
 
@@ -349,6 +409,326 @@ local function search_slide_action(reason, direction)
     }
 end
 
+local function copy_action(action)
+    local out = {}
+    for key, value in pairs(action or {}) do
+        out[key] = value
+    end
+    return out
+end
+
+local function repeat_slide_matches_plan(plan, action)
+    if type(plan) ~= "table" or Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) ~= "SLIDE" then
+        return false
+    end
+    local _, y1 = Parser.point_value(Parser.field(action, "point1", "Point1"))
+    local _, y2 = Parser.point_value(Parser.field(action, "point2", "Point2"))
+    if not y1 or not y2 or y1 == y2 then
+        return false
+    end
+    if plan.direction == "up" then
+        return y1 > y2
+    end
+    if plan.direction == "down" then
+        return y1 < y2
+    end
+    return false
+end
+
+local function repeat_direction_text(plan)
+    return plan and plan.direction == "down" and "下划" or "上划"
+end
+
+local function repeat_task_wait_action(plan)
+    return {
+        action = "WAIT",
+        value = tostring(plan.interval_seconds),
+        auto_recovery = "repeat_task",
+        repeat_task_phase = "wait",
+        verify = "上一轮计划内" .. repeat_direction_text(plan) .. "已使画面变化，按用户要求等待指定间隔。",
+        note = "重复任务进度：" .. tostring(plan.completed_count or 0) .. "/" .. tostring(plan.max_count or "?") .. "。",
+        explain = "用户要求每 " .. tostring(plan.interval_seconds) .. " 秒执行一次滑动，自动等待后继续。",
+        key_process = "重复任务等待间隔",
+        summary = "已完成 " .. tostring(plan.completed_count or 0) .. " 次" .. repeat_direction_text(plan) .. "，等待 " .. tostring(plan.interval_seconds) .. " 秒后继续。",
+    }
+end
+
+local function repeat_task_slide_action(plan)
+    return {
+        action = "SLIDE",
+        point1 = { plan.point1[1], plan.point1[2] },
+        point2 = { plan.point2[1], plan.point2[2] },
+        auto_recovery = "repeat_task",
+        repeat_task_phase = "slide",
+        verify = "上一轮等待已完成，继续执行用户要求的重复" .. repeat_direction_text(plan) .. "。",
+        note = "重复任务进度：" .. tostring(plan.completed_count or 0) .. "/" .. tostring(plan.max_count or "?") .. "。",
+        explain = "用户明确要求重复滑动，自动按计划执行下一次。",
+        key_process = "执行重复" .. repeat_direction_text(plan),
+        summary = "按重复任务计划继续执行第 " .. tostring((plan.completed_count or 0) + 1) .. " 次" .. repeat_direction_text(plan) .. "。",
+    }
+end
+
+local function repeat_task_complete_action(plan)
+    return {
+        action = "COMPLETE",
+        ["return"] = "重复滑动任务已完成，已按要求" .. repeat_direction_text(plan) .. " " .. tostring(plan.completed_count or plan.max_count or 0) .. " 次。",
+        auto_recovery = "repeat_task",
+        repeat_task_phase = "complete",
+        verify = "重复滑动次数已达到用户要求。",
+        note = "重复任务进度：" .. tostring(plan.completed_count or 0) .. "/" .. tostring(plan.max_count or "?") .. "。",
+        explain = "受控循环计数已达到目标次数，报告任务完成。",
+        key_process = "重复任务完成",
+        summary = "重复滑动任务已达到目标次数。",
+    }
+end
+
+local function repeat_task_meta(plan, reason)
+    return {
+        kind = "repeat_task",
+        reason = reason,
+        completed_count = plan.completed_count or 0,
+        max_count = plan.max_count,
+        interval_seconds = plan.interval_seconds,
+        direction = plan.direction,
+        status = plan.status,
+    }
+end
+
+local function set_repeat_plan_status(plan, status, reason)
+    if not plan or plan.status == status and plan.pause_reason == reason then
+        return
+    end
+    plan.status = status
+    plan.pause_reason = reason
+    Config.append_log(CONFIG, {
+        time = sys.mtime(),
+        type = "repeat_task_state",
+        status = status,
+        reason = reason,
+        completed_count = plan.completed_count or 0,
+        max_count = plan.max_count,
+        interval_seconds = plan.interval_seconds,
+        direction = plan.direction,
+    })
+end
+
+local function update_repeat_plan_from_latest(memory)
+    local plan = memory and memory.repeat_plan
+    if type(plan) ~= "table" or plan.status == "completed" then
+        return
+    end
+    local records = memory.records or {}
+    local latest = records[#records]
+    if type(latest) ~= "table" or latest.repeat_plan_seen then
+        return
+    end
+    local action_type = Parser.normalize_action_type(Parser.field(latest.action, "action", "Action", "action_type", "type"))
+    if action_type == "WAIT" and Parser.field(latest.action, "auto_recovery", "Auto_recovery") == "repeat_task" then
+        latest.repeat_plan_seen = true
+        if latest.execution and latest.execution.error then
+            set_repeat_plan_status(plan, "paused", "计划内等待执行失败：" .. tostring(latest.execution.error))
+            return
+        end
+        plan.next_action = "SLIDE"
+        return
+    end
+    if action_type ~= "SLIDE" or not repeat_slide_matches_plan(plan, latest.action) then
+        latest.repeat_plan_seen = true
+        return
+    end
+
+    latest.repeat_plan_seen = true
+    if latest.execution and latest.execution.error then
+        set_repeat_plan_status(plan, "paused", "计划内滑动执行失败：" .. tostring(latest.execution.error))
+        return
+    end
+
+    local change_status = latest.screen_change and latest.screen_change.status
+    if change_status == "unchanged" then
+        if plan.status == "active" then
+            plan.unchanged_count = (tonumber(plan.unchanged_count) or 0) + 1
+            if plan.unchanged_count >= 2 then
+                set_repeat_plan_status(plan, "paused", "计划内滑动连续 2 次未改变画面")
+            else
+                plan.next_action = "WAIT"
+            end
+        end
+        return
+    end
+
+    if change_status ~= "changed" then
+        if plan.status == "active" then
+            set_repeat_plan_status(plan, "paused", "计划内滑动后的画面变化无法确认")
+        end
+        return
+    end
+
+    plan.unchanged_count = 0
+    plan.completed_count = (tonumber(plan.completed_count) or 0) + 1
+    if plan.status ~= "active" then
+        set_repeat_plan_status(plan, "active", "检测到计划内滑动已成功改变画面，开始受控重复循环")
+    end
+    if plan.completed_count >= plan.max_count then
+        plan.next_action = "COMPLETE"
+        set_repeat_plan_status(plan, "completed", "重复滑动次数已达到目标")
+    else
+        plan.next_action = "WAIT"
+    end
+end
+
+local function automatic_repeat_task_action(config, memory)
+    local plan = memory and memory.repeat_plan
+    if type(plan) ~= "table" then
+        return nil
+    end
+    if plan.status == "completed" or plan.next_action == "COMPLETE" or (tonumber(plan.completed_count) or 0) >= (tonumber(plan.max_count) or math.huge) then
+        plan.next_action = "COMPLETE"
+        return repeat_task_complete_action(plan), repeat_task_meta(plan, "重复滑动次数已达到用户要求，自动完成。")
+    end
+    if plan.status ~= "active" then
+        return nil
+    end
+    if plan.next_action == "WAIT" then
+        plan.next_action = nil
+        return repeat_task_wait_action(plan), repeat_task_meta(plan, "计划内滑动已生效，按用户要求等待间隔。")
+    end
+    if plan.next_action == "SLIDE" then
+        plan.next_action = nil
+        return repeat_task_slide_action(plan), repeat_task_meta(plan, "等待间隔已完成，自动执行下一次计划内滑动。")
+    end
+    return nil
+end
+
+local function action_search_direction(action)
+    if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) ~= "SLIDE" then
+        return nil
+    end
+    local _, y1 = Parser.point_value(Parser.field(action, "point1", "Point1"))
+    local _, y2 = Parser.point_value(Parser.field(action, "point2", "Point2"))
+    if not y1 or not y2 or y1 == y2 then
+        return nil
+    end
+    if y1 > y2 then
+        return "reveal_below"
+    end
+    return "reveal_above"
+end
+
+local AUTO_CONTINUE_RECOVERY = {
+    bad_slide_reverse = true,
+    continue_effective_slide = true,
+}
+
+local function automatic_search_continuation_action(config, memory, observation)
+    if not Policy.task_requests_search(config) then
+        return nil
+    end
+    local records = (memory and memory.records) or {}
+    local latest = records[#records]
+    local latest_action = latest and latest.action
+    if type(latest_action) ~= "table" or not AUTO_CONTINUE_RECOVERY[latest_action.auto_recovery] then
+        return nil
+    end
+    if not (type(latest.screen_change) == "table" and latest.screen_change.status == "changed") then
+        return nil
+    end
+
+    local target_action, target = visible_navigation_target_action(config, { action = "SLIDE" }, observation)
+    if target_action then
+        target_action.auto_recovery = "visible_navigation_target"
+        return target_action, {
+            kind = "visible_target",
+            target = target,
+            reason = "自动恢复滑动后发现任务路径目标已可见，直接点击目标。",
+        }
+    end
+
+    if not action_search_direction(latest_action) then
+        return nil
+    end
+    local action = copy_action(latest_action)
+    action.auto_recovery = "continue_effective_slide"
+    action.verify = "上一轮自动恢复滑动后截图主内容已有变化，说明该方向仍可继续探索。"
+    action.note = "当前目标尚未在结构化元素列表中可见，继续沿最近有效滑动方向查找。"
+    action.explain = "避免让模型反复提出已证明无效的相反方向；先延续已验证有效的探索方向。"
+    action.key_process = "沿最近有效方向继续查找"
+    action.summary = "自动延续上一轮已验证有效的滑动方向，继续查找任务路径目标。"
+    return action, {
+        kind = "continue_slide",
+        reason = "上一轮自动恢复滑动有效，目标仍不可见，继续同方向探索。",
+    }
+end
+
+local function compact_text(text)
+    text = tostring(text or "")
+    text = string.lower(text)
+    text = string.gsub(text, "%s+", "")
+    return text
+end
+
+local function has_attempted_awake(memory, app_name)
+    local target = compact_text(app_name)
+    if target == "" then
+        return true
+    end
+    if type(memory) == "table" and type(memory.app_awake_attempted) == "table" and memory.app_awake_attempted[target] then
+        return true
+    end
+    for _, record in ipairs((memory and memory.records) or {}) do
+        local action = record and record.action
+        local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+        if action_type == "AWAKE" then
+            local value = Parser.field(action, "value", "Value", "app", "App")
+            if compact_text(value) == target then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function automatic_app_awake_action(config, memory)
+    local app_name = Policy.task_app_launch_target(config)
+    if not app_name or has_attempted_awake(memory, app_name) then
+        return nil
+    end
+    if type(memory) == "table" then
+        memory.app_awake_attempted = memory.app_awake_attempted or {}
+        memory.app_awake_attempted[compact_text(app_name)] = true
+    end
+    return {
+        action = "AWAKE",
+        value = app_name,
+        auto_recovery = "task_app_awake",
+        verify = "用户任务开头明确要求打开应用，应优先使用语义启动而不是在主屏猜测图标。",
+        note = "先用 AWAKE 打开“" .. tostring(app_name) .. "”。",
+        explain = "主屏图标可能分页、改名或被误认；明确 App 名称时直接使用应用启动动作更可靠。",
+        key_process = "语义启动目标应用",
+        summary = "任务要求打开“" .. tostring(app_name) .. "”，自动优先执行 AWAKE。",
+    }, {
+        kind = "app_awake",
+        app_name = app_name,
+        reason = "任务开头明确要求打开应用，自动优先使用 AWAKE。",
+    }
+end
+
+local function recent_effective_search_direction(memory)
+    local records = (memory and memory.records) or {}
+    for i = #records, 1, -1 do
+        local direction = action_search_direction(records[i].action)
+        if direction then
+            local change = records[i].screen_change
+            if type(change) == "table" and change.status == "changed" then
+                return direction
+            end
+            if type(change) == "table" and change.status == "unchanged" then
+                return nil
+            end
+        end
+    end
+    return nil
+end
+
 fallback_search_slide_action = function(reason, config, memory, preferred_direction)
     local directions = {}
     if preferred_direction then
@@ -356,12 +736,19 @@ fallback_search_slide_action = function(reason, config, memory, preferred_direct
         directions[#directions + 1] = normalized
         directions[#directions + 1] = opposite_search_direction(normalized)
     else
-        directions[#directions + 1] = "reveal_below"
-        directions[#directions + 1] = "reveal_above"
+        local recent_direction = recent_effective_search_direction(memory)
+        if recent_direction then
+            directions[#directions + 1] = recent_direction
+            directions[#directions + 1] = opposite_search_direction(recent_direction)
+        else
+            directions[#directions + 1] = "reveal_below"
+            directions[#directions + 1] = "reveal_above"
+        end
     end
     for _, direction in ipairs(directions) do
         local slide_action = search_slide_action(reason, direction)
-        if not Memory.would_repeat_ineffective_action(config, memory, slide_action) then
+        local known_bad = Memory.detect_bad_action_reuse(config, memory, slide_action)
+        if not known_bad and not Memory.would_repeat_ineffective_action(config, memory, slide_action) then
             return slide_action
         end
     end
@@ -491,9 +878,11 @@ local function write_session_start()
         search_exploration_retry_count = CONFIG.search_exploration_retry_count,
         ineffective_action_retry_count = CONFIG.ineffective_action_retry_count,
         search_slide_threshold = CONFIG.search_slide_threshold,
+        repetition_guard_mode = CONFIG.repetition_guard_mode,
         enable_state_compression = CONFIG.enable_state_compression,
         enable_ui_element_observation = CONFIG.enable_ui_element_observation,
         ui_element_observation_max_elements = CONFIG.ui_element_observation_max_elements,
+        repeat_plan = CONFIG.repeat_plan,
     })
 end
 
@@ -541,6 +930,7 @@ end
 local function run_step(step, memory)
     local image_data_url, screenshot_path, observation_prompt, observation_meta, observation = capture_frame(step)
     update_last_screen_change(memory, screenshot_path)
+    update_repeat_plan_from_latest(memory)
     local history = Memory.build_history(CONFIG, memory)
 
     local model_text, repaired_text, action, parse_err
@@ -589,6 +979,30 @@ local function run_step(step, memory)
         sys.msleep(300)
     end
 
+    local automatic_action, automatic_meta = automatic_repeat_task_action(CONFIG, memory)
+    local automatic_kind = "repeat_task_action"
+    if not automatic_action then
+        automatic_action, automatic_meta = automatic_app_awake_action(CONFIG, memory)
+        automatic_kind = "automatic_app_awake"
+    end
+    if not automatic_action then
+        automatic_action, automatic_meta = automatic_search_continuation_action(CONFIG, memory, observation)
+        automatic_kind = "automatic_search_continuation"
+    end
+    if automatic_action and Parser.validate_action(automatic_action) then
+        action = automatic_action
+        model_text = "[automatic] " .. tostring(automatic_meta and automatic_meta.reason or "自动延续搜索探索")
+        repaired_text = automatic_kind
+        Config.append_log(CONFIG, {
+            time = sys.mtime(),
+            type = automatic_kind == "repeat_task_action" and "repeat_task_action" or "automatic_action",
+            step = step,
+            action = action,
+            meta = automatic_meta,
+        })
+    end
+
+    if not action then
     for model_call_index = 1, max_recovery_model_calls do
         local model_err
         local active_history = use_parse_reset_history and PARSE_RESET_HISTORY or history
@@ -665,6 +1079,24 @@ local function run_step(step, memory)
                 prepare_retry_frame(tostring(step) .. "_premature_info_" .. tostring(consecutive_premature_info_count), premature_info_retry_instruction(early_info_reason, consecutive_premature_info_count))
             elseif bad_action_reason then
                 consecutive_bad_action_count = consecutive_bad_action_count + 1
+                if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) == "SLIDE" then
+                    action = bad_action_retry_failed_action(CONFIG, memory, bad_action_reason, action, consecutive_bad_action_count)
+                    if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) ~= "INFO" then
+                        LCC.log(1, "候选滑动方向已被截图证明无效，直接改用保守恢复：" .. Memory.action_signature(action))
+                        Config.append_log(CONFIG, {
+                            time = sys.mtime(),
+                            type = "bad_action_recovery",
+                            step = step,
+                            retry = consecutive_bad_action_count,
+                            reason = bad_action_reason,
+                            action = action,
+                            model_response = model_text,
+                            repaired_response = repaired_text,
+                        })
+                        repaired_text = nil
+                        break
+                    end
+                end
                 if consecutive_bad_action_count > CONFIG.bad_action_retry_count or model_call_index >= max_recovery_model_calls then
                     action = bad_action_retry_failed_action(CONFIG, memory, bad_action_reason, action, consecutive_bad_action_count)
                     if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) == "INFO" then
@@ -767,6 +1199,24 @@ local function run_step(step, memory)
             prepare_retry_frame(tostring(step) .. "_parse_" .. tostring(consecutive_parse_error_count), parse_retry_instruction(parse_err, model_text, consecutive_parse_error_count, use_parse_reset_history))
         elseif parse_err then
             local missing_action_type = Parser.coordinate_missing_action_type(parse_err) or "UNKNOWN"
+            local partial_action = Parser.parse_action(model_text)
+            local filled_action, autofill = Observation.autofill_point_action(observation, partial_action, model_text, missing_action_type)
+            if filled_action and Parser.validate_action(filled_action) then
+                action = filled_action
+                repaired_text = nil
+                LCC.log(1, "模型输出 " .. missing_action_type .. " 缺少坐标，已从当前可见元素“" .. tostring(autofill.target_text or "") .. "”自动补全：" .. tostring(autofill.point[1]) .. "," .. tostring(autofill.point[2]))
+                Config.append_log(CONFIG, {
+                    time = sys.mtime(),
+                    type = "coordinate_autofill",
+                    step = step,
+                    missing_action_type = missing_action_type,
+                    error = parse_err,
+                    action = action,
+                    autofill = autofill,
+                    model_response = model_text,
+                })
+                break
+            end
             if missing_action_type == last_missing_action_type then
                 consecutive_missing_count = consecutive_missing_count + 1
             else
@@ -804,6 +1254,7 @@ local function run_step(step, memory)
             prepare_retry_frame(tostring(step) .. "_coordinate_" .. tostring(total_coordinate_retries), coordinate_retry_instruction(parse_err, model_text, consecutive_missing_count, missing_action_type))
         end
     end
+    end
 
     if not action then
         action = parse_retry_failed_action(parse_err or "模型恢复循环结束但没有可执行动作", math.max(consecutive_parse_error_count, consecutive_missing_count))
@@ -811,6 +1262,20 @@ local function run_step(step, memory)
     action = Memory.sanitize_action(action)
 
     local original_action = action
+    local visible_target_action, visible_target = visible_navigation_target_action(CONFIG, action, observation)
+    if visible_target_action and Parser.validate_action(visible_target_action) then
+        action = visible_target_action
+        LCC.log(1, "任务路径目标已可见，改为点击“" .. tostring(visible_target.text or "") .. "”：" .. tostring(visible_target.point[1]) .. "," .. tostring(visible_target.point[2]))
+        Config.append_log(CONFIG, {
+            time = sys.mtime(),
+            type = "visible_target_guard",
+            step = step,
+            original_action = original_action,
+            action = action,
+            target = visible_target,
+        })
+    end
+
     local guard_reason = Memory.detect_repetition(CONFIG, memory, action)
     if guard_reason then
         action = make_guard_action(original_action, guard_reason)
@@ -826,7 +1291,7 @@ local function run_step(step, memory)
     local unrelated_click_reason = click_hits_unrelated_visible_text(CONFIG, action, observation)
     if unrelated_click_reason then
         local blocked_action = action
-        action = fallback_search_slide_action(unrelated_click_reason, CONFIG, memory, "up")
+        action = fallback_search_slide_action(unrelated_click_reason, CONFIG, memory)
         LCC.log(1, "候选点击命中无关文本，改为滑动查找：" .. tostring(unrelated_click_reason))
         Config.append_log(CONFIG, {
             time = sys.mtime(),
@@ -866,10 +1331,12 @@ local function run_step(step, memory)
 end
 
 local function run_agent()
+    local memory = Memory.new()
+    memory.repeat_plan = Policy.task_repeat_plan(CONFIG)
+    CONFIG.repeat_plan = memory.repeat_plan
     write_session_start()
     Ui.toast("Device Agent start: " .. CONFIG.task)
 
-    local memory = Memory.new()
     for step = 1, CONFIG.max_steps do
         local stopped, ok, result = run_step(step, memory)
         if stopped then

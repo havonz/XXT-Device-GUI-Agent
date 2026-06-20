@@ -253,6 +253,17 @@
       ],
       "select": 1,
       "numPerLine": 2
+    },
+    {
+      "type": "RadioGroup",
+      "caption": "重复动作保护",
+      "item": [
+        "关闭",
+        "仅提醒",
+        "强制拦截"
+      ],
+      "select": 2,
+      "numPerLine": 3
     }
   ],
   "KeyList": {},

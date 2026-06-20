@@ -12,6 +12,18 @@ local SLIDE_LOOP_ACTIONS = {
     SLIDE = true,
 }
 
+local LOOP_GUARD_EXEMPT_ACTIONS = {
+    COMPLETE = true,
+    INFO = true,
+    ABORT = true,
+}
+
+local BAD_MEMORY_EXEMPT_ACTIONS = {
+    COMPLETE = true,
+    INFO = true,
+    ABORT = true,
+}
+
 local HARD_FAILURE_PATTERNS = {
     "未执行有效动作",
     "操作错误",
@@ -49,14 +61,60 @@ local GENERAL_FAILURE_PATTERNS = {
     "没有成功",
 }
 
+local PREVIOUS_ACTION_FAILURE_PATTERNS = {
+    "错误地进入",
+    "进入错误",
+    "进错",
+    "误入",
+    "误点击",
+    "点错",
+    "操作错误",
+    "需要先返回",
+    "需要点击返回",
+    "需要返回",
+    "返回上级",
+    "返回上一页",
+    "回到主设置",
+    "返回主设置",
+    "wrong page",
+    "wrong screen",
+    "incorrect page",
+    "misclick",
+    "mis-click",
+}
+
 local bad_action_entries
 local recovery_hint_lines
+local repetition_warning_lines
 
 function M.new()
     return {
         records = {},
         compressed_state = "",
     }
+end
+
+local function repetition_guard_mode(config)
+    local mode = type(config) == "table" and config.repetition_guard_mode or nil
+    if mode == "off" or mode == "warn" or mode == "block" then
+        return mode
+    end
+    if type(config) == "table" and config.enable_repetition_guard == true then
+        return "block"
+    end
+    return "off"
+end
+
+local function repetition_guard_blocks(config)
+    return repetition_guard_mode(config) == "block"
+end
+
+local function repetition_guard_warns(config)
+    return repetition_guard_mode(config) == "warn"
+end
+
+function M.repetition_guard_mode(config)
+    return repetition_guard_mode(config)
 end
 
 local function limit_text(text, max_chars)
@@ -95,6 +153,14 @@ local function clean_history_text(text)
     end
     local kept = {}
     local markers = {
+        "action:",
+        "action：",
+        "Action:",
+        "Action：",
+        "建议操作",
+        "建议下一步",
+        "推荐操作",
+        "下一步操作",
         "screen_after_action:",
         "execution:",
         "execution_result:",
@@ -132,8 +198,49 @@ local function text_field(action, key)
     return limit_text(value, 800)
 end
 
-local function screen_change_text(change)
+local function clean_compressed_state_text(text)
+    text = clean_history_text(text)
+    if text == "" then
+        return ""
+    end
+    local kept = {}
+    local drop_patterns = {
+        "建议操作",
+        "建议下一步",
+        "推荐操作",
+        "下一步操作",
+        "继续向下滚动",
+        "继续向上滚动",
+        "继续同方向",
+        "应继续向下",
+        "应继续向上",
+    }
+    for line in string.gmatch(text .. "\n", "([^\n]*)\n") do
+        local drop = false
+        for _, pattern in ipairs(drop_patterns) do
+            if string.find(line, pattern, 1, true) then
+                drop = true
+                break
+            end
+        end
+        if not drop then
+            kept[#kept + 1] = line
+        end
+    end
+    return string.gsub(table.concat(kept, "\n"), "\n+$", "")
+end
+
+local function record_is_complete_confirmation_pending(record)
+    return type(record) == "table"
+        and type(record.execution) == "table"
+        and record.execution.reason == "COMPLETE_CONFIRMATION_PENDING"
+end
+
+local function screen_change_text(change, record)
     if type(change) ~= "table" then
+        return nil
+    end
+    if record_is_complete_confirmation_pending(record) then
         return nil
     end
     if change.status == "changed" then
@@ -196,15 +303,50 @@ local function execution_result_line(execution)
         return nil
     end
     if executed == "tap" or executed == "double_tap" or executed == "long_press" then
-        return "execution_result: " .. executed .. " at " .. tostring(execution.x or "?") .. "," .. tostring(execution.y or "?")
+        return "execution_result: " .. executed .. " executed"
     end
     if executed == "slide" or executed == "long_press_drag" then
-        return "execution_result: " .. executed .. " from " .. tostring(execution.x0 or "?") .. "," .. tostring(execution.y0 or "?") .. " to " .. tostring(execution.x1 or "?") .. "," .. tostring(execution.y1 or "?")
+        return "execution_result: " .. executed .. " executed"
     end
     if executed == "type" then
         return "execution_result: type, input_ok=" .. tostring(execution.input_ok)
     end
     return "execution_result: " .. limit_text(executed, 180)
+end
+
+local function point_text(point)
+    local x, y = Parser.point_value(point)
+    if not x or not y then
+        return "坐标未知"
+    end
+    return tostring(x) .. "," .. tostring(y)
+end
+
+local function operation_text(action)
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type == "" then
+        return "none"
+    end
+    if action_type == "CLICK" then
+        return "点击 " .. point_text(Parser.field(action, "point", "Point"))
+    end
+    if action_type == "DOUBLECLICK" then
+        return "双击 " .. point_text(Parser.field(action, "point", "Point"))
+    end
+    if action_type == "LONGPRESS" then
+        return "长按 " .. point_text(Parser.field(action, "point", "Point"))
+    end
+    if action_type == "SLIDE" then
+        return "滑动 " .. point_text(Parser.field(action, "point1", "Point1")) .. " -> " .. point_text(Parser.field(action, "point2", "Point2"))
+    end
+    if action_type == "LONGPRESS_DRAG" then
+        return "长按拖拽 " .. point_text(Parser.field(action, "point1", "Point1")) .. " -> " .. point_text(Parser.field(action, "point2", "Point2"))
+    end
+    local value = Parser.action_value(action) or Parser.field(action, "key", "Key")
+    if value ~= nil and value ~= "" then
+        return action_type .. " " .. tostring(value)
+    end
+    return action_type
 end
 
 function M.record_to_history(record)
@@ -218,7 +360,7 @@ function M.record_to_history(record)
         "verify: " .. text_field(action, "verify"),
         "note: " .. text_field(action, "note"),
         "explain: " .. text_field(action, "explain"),
-        "action: " .. (json.encode(sanitized_action(action)) or "{}"),
+        "operation: " .. operation_text(action),
         "key_process: " .. text_field(action, "key_process"),
         "summary: " .. text_field(action, "summary"),
     }
@@ -226,7 +368,7 @@ function M.record_to_history(record)
     if assist_line then
         lines[#lines + 1] = assist_line
     end
-    local change_line = screen_change_text(record.screen_change)
+    local change_line = screen_change_text(record.screen_change, record)
     if change_line then
         lines[#lines + 1] = "screen_after_action: " .. change_line
     end
@@ -243,7 +385,10 @@ function M.build_history(config, memory)
     end
     local parts = {}
     if type(memory.compressed_state) == "string" and memory.compressed_state ~= "" then
-        parts[#parts + 1] = "以下是更早历史的压缩状态：\n" .. memory.compressed_state
+        local compressed_state = clean_compressed_state_text(memory.compressed_state)
+        if compressed_state ~= "" then
+            parts[#parts + 1] = "以下是更早历史的压缩状态：\n" .. compressed_state
+        end
     end
 
     local records = memory.records or {}
@@ -262,6 +407,10 @@ function M.build_history(config, memory)
     local recovery_lines = recovery_hint_lines and recovery_hint_lines(config, records)
     if recovery_lines and #recovery_lines > 0 then
         parts[#parts + 1] = "错误回退后的当前状态（本轮必须先遵守）:\n" .. table.concat(recovery_lines, "\n")
+    end
+    local repeat_lines = repetition_warning_lines and repetition_warning_lines(config, records)
+    if repeat_lines and #repeat_lines > 0 then
+        parts[#parts + 1] = "重复动作软提醒（不强制拦截）:\n" .. table.concat(repeat_lines, "\n")
     end
     for i = start_idx, #records do
         parts[#parts + 1] = M.record_to_history(records[i])
@@ -296,7 +445,9 @@ function M.compress(config, memory, call_text_model)
 4. 你压缩的是较早步骤，不要把较早步骤所在页面称为“当前页面”；当前页面以后续未压缩记录和最新截图为准。
 5. 如果只是某个可见区域未找到目标，但流程仍在继续探索，不要压缩成“任务找不到”或“无法继续”。
 6. 如果旧压缩状态与新增记录冲突，以新增记录为准。
-7. 输出控制在 ]] .. tostring(config.state_compression_max_chars) .. [[ 字符以内。
+7. 不要输出“建议操作”“建议下一步”“继续向下/向上”之类操作建议；当前方向必须由后续最新截图重新判断。
+8. 如果多次同方向滑动未找到目标，只保留事实，例如“多次向下查找未找到”，不要把它压缩成“应继续同方向查找”。
+9. 输出控制在 ]] .. tostring(config.state_compression_max_chars) .. [[ 字符以内。
 
 旧压缩状态：
 ]] .. tostring(memory.compressed_state or "none") .. [[
@@ -308,7 +459,7 @@ function M.compress(config, memory, call_text_model)
     if not compressed then
         return err
     end
-    memory.compressed_state = limit_text(compressed, config.state_compression_max_chars)
+    memory.compressed_state = limit_text(clean_compressed_state_text(compressed), config.state_compression_max_chars)
     local kept = {}
     for i = compress_count + 1, #records do
         kept[#kept + 1] = records[i]
@@ -356,7 +507,7 @@ local function combined_feedback_text(record)
             end
         end
     end
-    local change_line = screen_change_text(record and record.screen_change)
+    local change_line = screen_change_text(record and record.screen_change, record)
     if change_line then
         parts[#parts + 1] = change_line
     end
@@ -482,6 +633,30 @@ local function action_type_of(action)
     return Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
 end
 
+local function action_exempt_from_loop_guard(action)
+    return LOOP_GUARD_EXEMPT_ACTIONS[action_type_of(action)] == true
+end
+
+local function action_exempt_from_bad_memory(action)
+    return BAD_MEMORY_EXEMPT_ACTIONS[action_type_of(action)] == true
+end
+
+local function action_is_repeat_task(action)
+    return Parser.field(action, "auto_recovery", "Auto_recovery") == "repeat_task"
+end
+
+local function record_screen_changed(record)
+    return type(record) == "table"
+        and type(record.screen_change) == "table"
+        and record.screen_change.status == "changed"
+end
+
+local function record_execution_failed(record)
+    return type(record) == "table"
+        and type(record.execution) == "table"
+        and record.execution.error ~= nil
+end
+
 local function has_failure_signal(text)
     text = tostring(text or "")
     local lower = string.lower(text)
@@ -509,6 +684,10 @@ local function has_failure_signal(text)
     return true
 end
 
+local function has_previous_action_failure_signal(text)
+    return Policy.text_contains_any(text, PREVIOUS_ACTION_FAILURE_PATTERNS)
+end
+
 local function repetition_threshold(config, action_type)
     local threshold = tonumber(config and config.same_action_loop_threshold) or 4
     if CLICK_LOOP_ACTIONS[action_type] then
@@ -533,41 +712,167 @@ local function consecutive_signature_count(records, signature)
     return same_count
 end
 
-function M.would_repeat_ineffective_action(config, memory, action)
-    local action_type = action_type_of(action)
-    local records = (memory and memory.records) or {}
-    if action_type == "SLIDE" and Policy.task_requests_search(config) then
-        local latest_feedback = combined_feedback_text(records[#records])
-        local latest_change = records[#records] and records[#records].screen_change
-        if Policy.search_feedback_can_continue(latest_feedback) and not (type(latest_change) == "table" and latest_change.status == "unchanged") then
-            return false
+local function latest_same_signature_record(records, signature)
+    local latest = records and records[#records]
+    if not latest or M.action_signature(latest.action) ~= signature then
+        return nil
+    end
+    return latest
+end
+
+local function repeated_slide_failure_reason(records, signature)
+    local latest = latest_same_signature_record(records, signature)
+    if not latest then
+        return nil
+    end
+    local latest_feedback = combined_feedback_text(latest)
+    if record_execution_failed(latest) then
+        return "上一轮相同滑动执行失败。证据：" .. limit_text(latest_feedback, 180)
+    end
+    if type(latest.screen_change) == "table" and latest.screen_change.status == "unchanged" then
+        return "上一轮相同滑动执行后截图主内容没有变化。证据：" .. limit_text(latest_feedback, 180)
+    end
+    if Policy.has_scroll_boundary(latest_feedback) then
+        return "最近反馈显示相同滑动可能已到边界或界面无变化。证据：" .. limit_text(latest_feedback, 180)
+    end
+    return nil
+end
+
+repetition_warning_lines = function(config, records)
+    if not repetition_guard_warns(config) or type(records) ~= "table" or #records < 1 then
+        return nil
+    end
+    local latest = records[#records]
+    local signature = M.action_signature(latest and latest.action)
+    if signature == "" then
+        return nil
+    end
+    local lines = {}
+    local action_type = action_type_of(latest.action)
+    if not action_exempt_from_loop_guard(latest.action) and not action_is_repeat_task(latest.action) then
+        local same_count = consecutive_signature_count(records, signature) - 1
+        local threshold = repetition_threshold(config, action_type)
+        if same_count >= threshold then
+            if action_type == "SLIDE" then
+                local slide_reason = repeated_slide_failure_reason(records, signature)
+                if slide_reason then
+                    lines[#lines + 1] = "- 最近连续 " .. tostring(same_count) .. " 次执行 " .. signature .. "，且" .. slide_reason .. " 如果当前截图仍没有明显进展，应尝试其它方向、幅度、入口或请求人工确认。"
+                end
+            else
+                lines[#lines + 1] = "- 最近连续 " .. tostring(same_count) .. " 次执行 " .. signature .. "。重复动作本身不一定错误；如果当前截图已经变化或用户明确要求重复，可以继续。若没有明显进展，应换目标、换策略或请求人工确认。"
+            end
         end
     end
-    local same_count = consecutive_signature_count(records, M.action_signature(action))
-    return same_count >= repetition_threshold(config, action_type)
+
+    local cycle_threshold = math.max(tonumber(config and config.action_cycle_threshold) or 3, 2)
+    local required_count = cycle_threshold * 2
+    if #records >= required_count then
+        local signatures = {}
+        for i = #records - required_count + 1, #records do
+            signatures[#signatures + 1] = M.action_signature(records[i].action)
+        end
+        local a = signatures[#signatures - 1]
+        local b = signatures[#signatures]
+        if a ~= b then
+            local matched = true
+            for i = #signatures - 2, 1, -2 do
+                if signatures[i] ~= b or signatures[i - 1] ~= a then
+                    matched = false
+                    break
+                end
+            end
+            if matched then
+                lines[#lines + 1] = "- 最近动作在 " .. a .. " 和 " .. b .. " 之间往返已达到 " .. tostring(cycle_threshold) .. " 轮。请先根据当前截图判断是否已经回到正确状态；如果没有，应换用新路径，不要继续机械往返。"
+            end
+        end
+    end
+
+    if #lines == 0 then
+        return nil
+    end
+    return lines
+end
+
+function M.would_repeat_ineffective_action(config, memory, action)
+    if not repetition_guard_blocks(config) then
+        return false
+    end
+    local action_type = action_type_of(action)
+    if action_exempt_from_loop_guard(action) then
+        return false
+    end
+    local records = (memory and memory.records) or {}
+    local signature = M.action_signature(action)
+    local same_count = consecutive_signature_count(records, signature)
+    if same_count < repetition_threshold(config, action_type) then
+        return false
+    end
+    if action_type == "SLIDE" then
+        return repeated_slide_failure_reason(records, signature) ~= nil
+    end
+    if action_is_repeat_task(action) then
+        return false
+    end
+    return true
+end
+
+local function record_has_direct_failure(record)
+    if type(record) ~= "table" then
+        return false
+    end
+    if record_is_complete_confirmation_pending(record) or action_exempt_from_bad_memory(record.action) then
+        return false
+    end
+    if type(record.screen_change) == "table" and record.screen_change.status == "unchanged" then
+        return true
+    end
+    return record_execution_failed(record)
+end
+
+local function blamed_failure_record(records, index, feedback)
+    local record = records[index]
+    if record_has_direct_failure(record) then
+        return record, index
+    end
+    local previous = records[index - 1]
+    if type(previous) ~= "table" or action_exempt_from_bad_memory(previous.action) then
+        return nil, nil
+    end
+    if record_screen_changed(previous) and not has_previous_action_failure_signal(feedback) then
+        return nil, nil
+    end
+    return previous, index - 1
 end
 
 bad_action_entries = function(config, records, start_idx)
     local entries = {}
     local seen = {}
-    local first = math.max(2, tonumber(start_idx) or 1)
+    local first = math.max(1, tonumber(start_idx) or 1)
     for i = first, #records do
-        local feedback = combined_feedback_text(records[i])
-        if has_failure_signal(feedback) then
-            local prev = records[i - 1]
-            local signature = M.action_signature(prev and prev.action)
-            if Policy.search_slide_can_continue(config, prev and prev.action, feedback) then
-                signature = nil
-            end
-            if signature and signature ~= "" and not seen[signature] then
-                seen[signature] = true
-                local evidence = limit_text(feedback, 220)
-                entries[#entries + 1] = {
-                    signature = signature,
-                    step = prev.step or (i - 1),
-                    evidence = evidence,
-                    line = "- STEP " .. tostring(prev.step or (i - 1)) .. " 的动作 " .. signature .. " 被下一帧判定为错误或未达预期；不要重复该动作，除非当前截图明确显示它已成为正确目标。证据：" .. evidence,
-                }
+        local record = records[i]
+        if not record_is_complete_confirmation_pending(record) then
+            local feedback = combined_feedback_text(record)
+            if has_failure_signal(feedback) then
+                local blamed, blamed_index = blamed_failure_record(records, i, feedback)
+                if blamed and action_exempt_from_bad_memory(blamed.action) then
+                    blamed = nil
+                end
+                if blamed then
+                    local signature = M.action_signature(blamed.action)
+                    if Policy.search_slide_can_continue(config, blamed.action, feedback) then
+                        signature = nil
+                    end
+                    if signature and signature ~= "" and not seen[signature] then
+                        seen[signature] = true
+                        local evidence = limit_text(feedback, 220)
+                        entries[#entries + 1] = {
+                            signature = signature,
+                            step = blamed.step or blamed_index,
+                            evidence = evidence,
+                            line = "- STEP " .. tostring(blamed.step or blamed_index) .. " 的动作 " .. signature .. " 被判定为错误或未达预期；不要重复该动作，除非当前截图明确显示它已成为正确目标。证据：" .. evidence,
+                        }
+                    end
+                end
             end
         end
     end
@@ -579,47 +884,65 @@ recovery_hint_lines = function(config, records)
         return nil
     end
     local latest = records[#records]
+    if record_is_complete_confirmation_pending(latest) then
+        return nil
+    end
     local feedback = combined_feedback_text(latest)
     if not has_failure_signal(feedback) then
         return nil
     end
-    local failed = records[#records - 1]
+    local failed, failed_index = blamed_failure_record(records, #records, feedback)
     local signature = M.action_signature(failed and failed.action)
     if not signature or signature == "" then
+        return nil
+    end
+    if action_exempt_from_bad_memory(failed and failed.action) then
         return nil
     end
     if Policy.search_slide_can_continue(config, failed and failed.action, feedback) then
         return nil
     end
+    if failed == latest then
+        return {
+            "- 最近 STEP " .. tostring(failed.step or failed_index) .. " 的动作 " .. signature .. " 已被当前截图变化判定为错误或未达预期。",
+            "- 本轮禁止再次执行 " .. signature .. "；必须改用其它可见目标、改变滑动方向/幅度，或使用 INFO 请求人工确认。证据：" .. limit_text(feedback, 220),
+        }
+    end
     return {
-        "- 上一轮已经判断 STEP " .. tostring(failed.step or (#records - 1)) .. " 的动作 " .. signature .. " 导致错误页面或未达预期。",
+        "- 上一轮已经判断 STEP " .. tostring(failed.step or failed_index) .. " 的动作 " .. signature .. " 导致错误页面或未达预期。",
         "- 最近 STEP " .. tostring(latest.step or #records) .. " 是纠正/回退动作；当前应在回退后的页面重新规划。",
         "- 本轮禁止再次执行 " .. signature .. "；必须改用其它可见目标、先 SLIDE 查找目标文字，或使用 INFO 请求人工确认。证据：" .. limit_text(feedback, 220),
     }
 end
 
 function M.detect_ineffective_action_loop(config, memory, action)
+    if not repetition_guard_blocks(config) then
+        return nil
+    end
     local records = (memory and memory.records) or {}
     local signature = M.action_signature(action)
     if signature == "" then
         return nil
     end
     local action_type = action_type_of(action)
+    if action_exempt_from_loop_guard(action) then
+        return nil
+    end
+    if action_is_repeat_task(action) then
+        return nil
+    end
     local same_count = consecutive_signature_count(records, signature)
     local threshold = repetition_threshold(config, action_type)
     if same_count >= threshold then
-        if action_type == "SLIDE" and Policy.task_requests_search(config) then
-            local latest_feedback = combined_feedback_text(records[#records])
-            local latest_change = records[#records] and records[#records].screen_change
-            if Policy.search_feedback_can_continue(latest_feedback) and not (type(latest_change) == "table" and latest_change.status == "unchanged") then
-                return nil
+        if action_type == "SLIDE" then
+            local slide_reason = repeated_slide_failure_reason(records, signature)
+            if slide_reason then
+                return "候选滚动动作 " .. signature .. " 已连续 " .. tostring(same_count) .. " 次，且" .. slide_reason .. " 应换方向、缩短/改变滑动幅度、点击其它可见入口或请求人工确认。"
             end
-            if type(latest_change) == "table" and latest_change.status == "unchanged" then
-                return "候选滚动动作 " .. signature .. " 执行后截图主内容没有变化；刚刚这个方向/幅度已验证无效。应尝试其它操作，例如反方向 SLIDE、缩短/改变滑动幅度、点击其它可见入口或返回上级重新定位。证据：" .. limit_text(latest_feedback, 180)
-            end
-            if Policy.has_scroll_boundary(latest_feedback) then
-                return "候选滚动动作 " .. signature .. " 已连续 " .. tostring(same_count) .. " 次，且最近反馈显示可能已到边界或界面无变化。应换方向、缩短滑动验证边界，或请求人工确认。证据：" .. limit_text(latest_feedback, 180)
-            end
+            return nil
+        end
+        if action_is_repeat_task(action) then
+            return nil
         end
         return "候选动作 " .. signature .. " 将形成连续 " .. tostring(same_count) .. " 次相同动作，达到阈值 " .. tostring(threshold) .. "。这通常表示前几次执行后页面没有有效变化；目标可能是状态文字、静态字段、禁用项，或当前页面不支持该方向滑动。"
     end
@@ -652,8 +975,11 @@ function M.detect_ineffective_action_loop(config, memory, action)
 end
 
 function M.detect_bad_action_reuse(config, memory, action)
+    if action_exempt_from_bad_memory(action) then
+        return nil
+    end
     local records = (memory and memory.records) or {}
-    if #records < 2 then
+    if #records < 1 then
         return nil
     end
     local recent_steps = tonumber(config and config.recent_history_steps) or #records
@@ -675,6 +1001,15 @@ function M.detect_bad_action_reuse(config, memory, action)
 end
 
 function M.detect_repetition(config, memory, action)
+    if not repetition_guard_blocks(config) then
+        return nil
+    end
+    if action_exempt_from_loop_guard(action) then
+        return nil
+    end
+    if action_is_repeat_task(action) then
+        return nil
+    end
     local records = (memory and memory.records) or {}
     local signature = M.action_signature(action)
     local action_type = action_type_of(action)
@@ -682,18 +1017,15 @@ function M.detect_repetition(config, memory, action)
     local threshold = repetition_threshold(config, action_type)
 
     if same_count >= threshold then
-        if action_type == "SLIDE" and Policy.task_requests_search(config) then
-            local latest_feedback = combined_feedback_text(records[#records])
-            local latest_change = records[#records] and records[#records].screen_change
-            if Policy.search_feedback_can_continue(latest_feedback) and not (type(latest_change) == "table" and latest_change.status == "unchanged") then
-                return nil
+        if action_type == "SLIDE" then
+            local slide_reason = repeated_slide_failure_reason(records, signature)
+            if slide_reason then
+                return "检测到重复滚动 " .. signature .. " 已达到 " .. tostring(same_count) .. " 次，且" .. slide_reason .. " 请换其它操作，不要继续重复同方向滑动。"
             end
-            if type(latest_change) == "table" and latest_change.status == "unchanged" then
-                return "检测到重复滚动 " .. signature .. " 执行后截图主内容没有变化；这个方向/幅度已验证无效。请换其它操作，不要继续重复同方向滑动。证据：" .. limit_text(latest_feedback, 180)
-            end
-            if Policy.has_scroll_boundary(latest_feedback) then
-                return "检测到连续重复滚动 " .. signature .. " 已达到 " .. tostring(same_count) .. " 次，且最近反馈显示可能已到边界或界面无变化。请远控确认当前页面状态，完成后点击完成。证据：" .. limit_text(latest_feedback, 180)
-            end
+            return nil
+        end
+        if action_is_repeat_task(action) then
+            return nil
         end
         return "检测到连续重复动作 " .. signature .. " 已达到 " .. tostring(same_count) .. " 次。请远控确认当前页面状态，完成后点击完成。"
     end

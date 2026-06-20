@@ -208,6 +208,48 @@ local function parse_gelab_fields(text)
     return parse_fields(text, keys, false)
 end
 
+local function operation_candidate_text(text)
+    text = strip_think(text)
+    local kept = {}
+    for line in string.gmatch(tostring(text or "") .. "\n", "([^\n]*)\n") do
+        local trimmed = trim(line)
+        local lower = string.lower(trimmed)
+        if string.find(trimmed, "^%[STEP") then
+            break
+        end
+        if string.find(trimmed, "当前手机屏幕截图如下", 1, true) then
+            break
+        end
+        if string.find(lower, "^screen_after_action%s*:")
+            or string.find(lower, "^execution_result%s*:") then
+            break
+        end
+        kept[#kept + 1] = line
+    end
+    return table.concat(kept, "\n")
+end
+
+local function action_candidate_text(text)
+    text = strip_think(text)
+    local kept = {}
+    for line in string.gmatch(tostring(text or "") .. "\n", "([^\n]*)\n") do
+        local trimmed = trim(line)
+        local lower = string.lower(trimmed)
+        if string.find(trimmed, "^%[STEP") then
+            break
+        end
+        if string.find(trimmed, "当前手机屏幕截图如下", 1, true) then
+            break
+        end
+        if not (string.find(lower, "^operation%s*:")
+            or string.find(lower, "^screen_after_action%s*:")
+            or string.find(lower, "^execution_result%s*:")) then
+            kept[#kept + 1] = line
+        end
+    end
+    return table.concat(kept, "\n")
+end
+
 local function add_key(keys, field_name)
     keys[#keys + 1] = field_name
 end
@@ -371,6 +413,77 @@ local function parse_gelab_action(text)
     return parse_space_fallback_action(text)
 end
 
+local function parse_operation_fields(text)
+    text = operation_candidate_text(text)
+    local keys = { "verify", "note", "explain", "operation", "point1", "point2", "point", "value", "text", "return", "summary", "key_process", "direction", "key", "duration", "seconds" }
+    return parse_fields(text, keys, false), text
+end
+
+local function operation_lines(text)
+    local lines = {}
+    for line in string.gmatch(tostring(text or "") .. "\n", "([^\n]*)\n") do
+        local value = string.match(line, "^%s*[Oo][Pp][Ee][Rr][Aa][Tt][Ii][Oo][Nn]%s*:%s*(.-)%s*$")
+        if value and value ~= "" then
+            lines[#lines + 1] = value
+        end
+    end
+    return lines
+end
+
+local function parse_operation_as_action(fields)
+    local raw = trim(fields.operation or "")
+    if raw == "" then
+        return nil
+    end
+    local parsed = parse_gelab_action("action:" .. raw)
+    if parsed and KNOWN_ACTION_TYPES[normalize_action_type_value(parsed.action)] then
+        for _, key in ipairs({ "verify", "note", "explain", "summary", "key_process", "value", "text", "return" }) do
+            if fields[key] ~= nil and parsed[key] == nil then
+                parsed[key] = fields[key]
+            end
+        end
+        if normalize_action_type_value(parsed.action) == "COMPLETE" and (parsed["return"] == nil or parsed["return"] == "") then
+            parsed["return"] = fields.value or fields.summary or fields.note or fields.explain
+        end
+        return parsed
+    end
+
+    local action_type = normalize_action_type_value(first_token(raw))
+    if raw == "滑动" or string.find(raw, "滑动", 1, true) then
+        local x1, y1, x2, y2 = string.match(raw, "(-?%d+)%D+(-?%d+)%D+(-?%d+)%D+(-?%d+)")
+        if x1 and y1 and x2 and y2 then
+            action_type = "SLIDE"
+            fields.point1 = tostring(x1) .. "," .. tostring(y1)
+            fields.point2 = tostring(x2) .. "," .. tostring(y2)
+        end
+    elseif raw == "点击" or string.find(raw, "点击", 1, true) or string.find(raw, "点按", 1, true) then
+        local point = parse_point_text(raw)
+        if point then
+            action_type = "CLICK"
+            fields.point = tostring(point[1]) .. "," .. tostring(point[2])
+        end
+    end
+
+    if not KNOWN_ACTION_TYPES[action_type] then
+        return nil
+    end
+    fields.action = action_type
+    if action_type == "COMPLETE" and (fields["return"] == nil or fields["return"] == "") then
+        fields["return"] = fields.value or fields.summary or fields.note or fields.explain
+    end
+    return action_from_fields(fields)
+end
+
+local function parse_current_operation_action(model_text)
+    local fields, candidate = parse_operation_fields(model_text)
+    local lines = operation_lines(candidate)
+    if #lines ~= 1 then
+        return nil
+    end
+    fields.operation = lines[1]
+    return parse_operation_as_action(fields)
+end
+
 local function extract_json_object(text)
     text = tostring(text or "")
     local start_idx = string.find(text, "{", 1, true)
@@ -490,7 +603,7 @@ local function action_type_from_field_value(value)
 end
 
 local function action_field_markers(text)
-    text = strip_think(text)
+    text = action_candidate_text(text)
     local lower = string.lower(text)
     local markers = {}
     local pos = 1
@@ -509,6 +622,18 @@ local function action_field_markers(text)
         pos = best_e + 1
     end
     return markers, text
+end
+
+local function has_action_intent(text)
+    local markers = action_field_markers(text)
+    if #markers > 0 then
+        return true
+    end
+    text = action_candidate_text(text)
+    if string.find(text, "[\"']action[\"']%s*:") then
+        return true
+    end
+    return string.find(text, "[\"']action_type[\"']%s*:") ~= nil
 end
 
 local function action_segment_text(text, markers, index)
@@ -615,6 +740,19 @@ local function has_point(point)
     return x ~= nil and y ~= nil
 end
 
+local function point_in_range(point)
+    local x, y = M.point_value(point)
+    if x == nil or y == nil then
+        return false
+    end
+    return x >= 0 and x <= 1000 and y >= 0 and y <= 1000
+end
+
+local function coordinate_range_error(action_type, field_name, point)
+    local x, y = M.point_value(point)
+    return tostring(action_type) .. " " .. tostring(field_name) .. " out of 0-1000 range: " .. tostring(x or "?") .. "," .. tostring(y or "?")
+end
+
 local function raw_has_point_field(text, field_name)
     text = strip_think(text)
     local fields = parse_fields(text, { field_name }, true)
@@ -682,12 +820,24 @@ function M.validate_action(action)
         return false, "missing action"
     end
     if M.is_point_action(action_type) then
-        if not has_point(M.field(action, "point", "Point")) then
+        local point = M.field(action, "point", "Point")
+        if not has_point(point) then
             return false, action_type .. " missing point"
         end
+        if not point_in_range(point) then
+            return false, coordinate_range_error(action_type, "point", point)
+        end
     elseif M.is_two_point_action(action_type) then
-        if not has_point(M.field(action, "point1", "Point1")) or not has_point(M.field(action, "point2", "Point2")) then
+        local point1 = M.field(action, "point1", "Point1")
+        local point2 = M.field(action, "point2", "Point2")
+        if not has_point(point1) or not has_point(point2) then
             return false, action_type .. " missing point1/point2"
+        end
+        if not point_in_range(point1) then
+            return false, coordinate_range_error(action_type, "point1", point1)
+        end
+        if not point_in_range(point2) then
+            return false, coordinate_range_error(action_type, "point2", point2)
         end
     elseif VALUE_REQUIRED_ACTIONS[action_type] then
         local value = M.action_value(action)
@@ -733,12 +883,13 @@ local function repair_action_format(config, call_text_model, model_text, reason)
 end
 
 function M.parse_action_checked(config, call_text_model, model_text)
-    local multi_action_err = multiple_action_fields_error(model_text)
+    local action_text = action_candidate_text(model_text)
+    local multi_action_err = multiple_action_fields_error(action_text)
     if multi_action_err then
         return nil, multi_action_err, nil
     end
 
-    local action, err = M.parse_action(model_text)
+    local action, err = M.parse_action(action_text)
     if action then
         local ok, validate_err = M.validate_action(action)
         if ok then
@@ -746,14 +897,27 @@ function M.parse_action_checked(config, call_text_model, model_text)
         end
         err = validate_err
         local action_type = M.normalize_action_type(M.field(action, "action", "Action", "action_type", "type"))
-        if M.is_coordinate_action(action_type) and not raw_has_required_coordinates(model_text, action_type) then
-            return nil, coordinate_missing_error(action_type, err, model_text), nil
+        if M.is_coordinate_action(action_type) and not raw_has_required_coordinates(action_text, action_type) then
+            return nil, coordinate_missing_error(action_type, err, action_text), nil
         end
+        if M.is_coordinate_action(action_type) and string.find(tostring(err or ""), "out of 0%-1000 range", 1, false) then
+            return nil, tostring(err), nil
+        end
+    elseif not has_action_intent(action_text) then
+        action = parse_current_operation_action(model_text)
+        if action then
+            local ok, validate_err = M.validate_action(action)
+            if ok then
+                return action, nil, "recovered operation field as action"
+            end
+            return nil, validate_err, nil
+        end
+        return nil, "missing action field; do not infer action from operation/execution history", nil
     end
 
     local repaired_text = nil
     for _ = 1, config.format_repair_retry_count do
-        local repair, repair_err = repair_action_format(config, call_text_model, model_text, err)
+        local repair, repair_err = repair_action_format(config, call_text_model, action_text, err)
         if not repair then
             return nil, tostring(err) .. "; repair failed: " .. tostring(repair_err), repaired_text
         end
@@ -765,8 +929,12 @@ function M.parse_action_checked(config, call_text_model, model_text)
                 return action, nil, repaired_text
             end
             err = validate_err
+            local action_type = M.normalize_action_type(M.field(action, "action", "Action", "action_type", "type"))
+            if M.is_coordinate_action(action_type) and string.find(tostring(err or ""), "out of 0%-1000 range", 1, false) then
+                return nil, tostring(err), repaired_text
+            end
         end
-        model_text = repair
+        action_text = repair
     end
     return nil, tostring(err), repaired_text
 end

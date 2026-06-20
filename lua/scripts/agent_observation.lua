@@ -12,6 +12,10 @@ local GENERIC_TEXTS = {
 local NOISY_TEXTS = {
     ["清除文本"] = true,
     ["Clear Text"] = true,
+    ["图像"] = true,
+    ["Image"] = true,
+    ["image"] = true,
+    ["chevron"] = true,
 }
 
 local IGNORED_ROLES = {
@@ -419,8 +423,277 @@ function M.text_at_point(observation, x, y)
     return best_text
 end
 
+local element_point
+
+local function element_text_value(element)
+    if type(element) ~= "table" then
+        return nil
+    end
+    return string_value(element.text or element.value)
+end
+
+function M.find_visible_text_target(observation, targets, options)
+    if type(observation) ~= "table" or type(observation.payload) ~= "table" or type(observation.payload.elements) ~= "table" then
+        return nil
+    end
+    if type(targets) ~= "table" or #targets == 0 then
+        return nil
+    end
+    options = options or {}
+
+    for target_index = #targets, 1, -1 do
+        local target = string_value(targets[target_index])
+        if target then
+            for _, element in ipairs(observation.payload.elements) do
+                local text = element_text_value(element)
+                local point = element_point(element)
+                if text == target and point and element.hittable ~= false then
+                    local box = type(element.box) == "table" and element.box or nil
+                    local y1 = box and tonumber(box.y1) or point[2]
+                    local top_navigation_hit = y1 and y1 < 140
+                    if not (
+                        (options.skip_top_navigation and top_navigation_hit)
+                        or (options.skip_first_top_title and target_index == 1 and top_navigation_hit)
+                    ) then
+                        return {
+                            text = text,
+                            point = { point[1], point[2] },
+                            element = element,
+                            target_index = target_index,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local POINT_ACTION_TYPES = {
+    CLICK = true,
+    LONGPRESS = true,
+    DOUBLECLICK = true,
+}
+
+local CLICK_COMMAND_WORDS = {
+    CLICK = { "点击", "点按", "轻点", "点选", "选择", "打开", "进入", "按下" },
+    DOUBLECLICK = { "双击", "点击", "点按", "轻点" },
+    LONGPRESS = { "长按", "按住" },
+}
+
+local function field_value(action, ...)
+    if type(action) ~= "table" then
+        return nil
+    end
+    for i = 1, select("#", ...) do
+        local field_name = select(i, ...)
+        local value = action[field_name]
+        if value ~= nil then
+            return value
+        end
+    end
+    return nil
+end
+
+local function normalize_action_type(value)
+    value = string.upper(tostring(value or ""))
+    if value == "LONG_PRESS" then
+        return "LONGPRESS"
+    end
+    if value == "DOUBLE_TAP" or value == "DOUBLE_CLICK" then
+        return "DOUBLECLICK"
+    end
+    return value
+end
+
+local function action_intent_text(action)
+    local parts = {}
+    for _, key in ipairs({ "value", "text", "note", "explain", "summary", "key_process" }) do
+        local value = field_value(action, key, string.upper(string.sub(key, 1, 1)) .. string.sub(key, 2))
+        if type(value) == "string" and value ~= "" then
+            parts[#parts + 1] = value
+        end
+    end
+    return table.concat(parts, " ")
+end
+
+local function model_intent_text(model_text)
+    local parts = {}
+    for line in string.gmatch(tostring(model_text or "") .. "\n", "([^\n]*)\n") do
+        local key = string.match(line, "^%s*([%w_]+)%s*:")
+        key = key and string.lower(key) or nil
+        if key ~= "verify" and key ~= "execution_result" and key ~= "screen_after_action" then
+            parts[#parts + 1] = line
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
+local function contains_quoted_text(context, target)
+    return string.find(context, "“" .. target .. "”", 1, true) ~= nil
+        or string.find(context, "\"" .. target .. "\"", 1, true) ~= nil
+        or string.find(context, "'" .. target .. "'", 1, true) ~= nil
+end
+
+local SENTENCE_SEPARATORS = { "。", "；", "，", ",", ".", "!", "?", "！", "？", "\n" }
+
+local function clip_to_sentence(text)
+    local limit = #text
+    for _, separator in ipairs(SENTENCE_SEPARATORS) do
+        local index = string.find(text, separator, 1, true)
+        if index and index - 1 < limit then
+            limit = index - 1
+        end
+    end
+    return string.sub(text, 1, limit)
+end
+
+local function contains_command_target(context, target, action_type)
+    if context == "" or target == "" then
+        return false
+    end
+    local words = CLICK_COMMAND_WORDS[action_type] or CLICK_COMMAND_WORDS.CLICK
+    for _, word in ipairs(words) do
+        local start_at = 1
+        while start_at <= #context do
+            local _, word_end = string.find(context, word, start_at, true)
+            if not word_end then
+                break
+            end
+            local nearby = clip_to_sentence(string.sub(context, word_end + 1, word_end + 180))
+            if string.find(nearby, target, 1, true) then
+                return true
+            end
+            start_at = word_end + 1
+        end
+    end
+    return false
+end
+
+element_point = function(element)
+    if type(element) ~= "table" then
+        return nil
+    end
+    local point = element.point
+    local x = type(point) == "table" and (tonumber(point.x) or tonumber(point[1])) or nil
+    local y = type(point) == "table" and (tonumber(point.y) or tonumber(point[2])) or nil
+    if (not x or not y) and type(element.box) == "table" then
+        x = ((tonumber(element.box.x1) or 0) + (tonumber(element.box.x2) or 0)) / 2
+        y = ((tonumber(element.box.y1) or 0) + (tonumber(element.box.y2) or 0)) / 2
+    end
+    if not x or not y then
+        return nil
+    end
+    return {
+        math.max(0, math.min(1000, math.floor(x + 0.5))),
+        math.max(0, math.min(1000, math.floor(y + 0.5))),
+    }
+end
+
+local function copy_action(action)
+    local out = {}
+    for key, value in pairs(action or {}) do
+        out[key] = value
+    end
+    return out
+end
+
+local function target_score(element_text, action_context, model_context, action_type, action)
+    local score = 0
+    local value = field_value(action, "value", "Value", "text", "Text")
+    if type(value) == "string" and string_value(value) == element_text then
+        score = score + 220
+    end
+    if contains_command_target(action_context, element_text, action_type) then
+        score = score + 180
+    end
+    if score == 0 and contains_command_target(model_context, element_text, action_type) then
+        score = score + 120
+    end
+    if score > 0 and contains_quoted_text(action_context, element_text) then
+        score = score + 20
+    end
+    if score > 0 then
+        score = score + math.min(#element_text, 60)
+    end
+    return score
+end
+
+local function best_target_candidate(observation, action, model_text, action_type)
+    if type(observation) ~= "table" or type(observation.payload) ~= "table" or type(observation.payload.elements) ~= "table" then
+        return nil
+    end
+
+    local action_context = action_intent_text(action)
+    local model_context = model_intent_text(model_text)
+    local best, second
+    for _, element in ipairs(observation.payload.elements) do
+        local point = element_point(element)
+        local texts = {}
+        local element_text = string_value(element.text)
+        local element_value = string_value(element.value)
+        if element_text then
+            texts[#texts + 1] = element_text
+        end
+        if element_value and element_value ~= element_text then
+            texts[#texts + 1] = element_value
+        end
+        for _, text in ipairs(texts) do
+            if point and text and #text >= 2 then
+                local score = target_score(text, action_context, model_context, action_type, action)
+                if element.hittable ~= false and score > 0 then
+                    score = score + 5
+                end
+                if score > 0 then
+                    local candidate = {
+                        score = score,
+                        text = text,
+                        point = point,
+                        element = element,
+                    }
+                    if not best or candidate.score > best.score then
+                        second = best
+                        best = candidate
+                    elseif not second or candidate.score > second.score then
+                        second = candidate
+                    end
+                end
+            end
+        end
+    end
+    return best, second
+end
+
+function M.autofill_point_action(observation, action, model_text, action_type)
+    action_type = normalize_action_type(action_type or field_value(action, "action", "Action", "action_type", "type"))
+    if not POINT_ACTION_TYPES[action_type] then
+        return nil
+    end
+    if type(action) ~= "table" or element_point({ point = field_value(action, "point", "Point") }) then
+        return nil
+    end
+
+    local best, second = best_target_candidate(observation, action, model_text, action_type)
+    if not best or best.score < 100 or (second and second.score == best.score) then
+        return nil
+    end
+
+    local filled = copy_action(action)
+    filled.action = action_type
+    filled.point = { best.point[1], best.point[2] }
+    return filled, {
+        target_text = best.text,
+        point = { best.point[1], best.point[2] },
+        element_id = best.element and best.element.id,
+        score = best.score,
+    }
+end
+
 function M.to_prompt(observation)
     if type(observation) ~= "table" or type(observation.json) ~= "string" or observation.json == "" then
+        return nil
+    end
+    if tonumber(observation.count) == nil or tonumber(observation.count) <= 0 then
         return nil
     end
     return [[

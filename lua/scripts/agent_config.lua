@@ -18,8 +18,52 @@ local DISABLED_VALUES = {
     ["no"] = true,
 }
 
+local NUMBER_OPTION_VALUES = {
+    ["模型温度"] = { 0.1, 0.5, 1 },
+    ["单次响应最大 Token"] = { 1024, 2048, 4096, 8192 },
+    ["最大步数"] = { 20, 40, 80, 160, 320, 640 },
+    ["请求超时时间（秒）"] = { 60, 120, 240, 320, 480, 640 },
+    ["人工介入超时时间（秒）"] = { 60, 120, 300, 600, 900, 1200 },
+    ["模型请求重试次数"] = { 0, 1, 2, 3 },
+    ["动作格式修复次数"] = { 0, 1, 2 },
+    ["截图 JPEG 质量"] = { 45, 55, 70, 85 },
+    ["动作后延迟毫秒数"] = { 300, 600, 1200, 1800, 2400 },
+    ["最近历史保留步数"] = { 4, 8, 12, 20 },
+    ["历史压缩间隔步数"] = { 5, 10, 20 },
+    ["压缩保留最近步数"] = { 4, 6, 10 },
+    ["压缩状态最大字符数"] = { 2000, 3000, 5000 },
+}
+
+local BOOLEAN_OPTION_VALUES = {
+    ["每帧提供文本元素列表"] = { false, true },
+    ["启用历史压缩"] = { true, false },
+    ["保存每步截图"] = { false, true },
+}
+
+local REPETITION_GUARD_OPTION_VALUES = {
+    "off",
+    "warn",
+    "block",
+}
+
+local function option_index(value, options)
+    local numeric = tonumber(value)
+    if numeric == nil or numeric % 1 ~= 0 then
+        return nil
+    end
+    if numeric < 1 or numeric > #options then
+        return nil
+    end
+    if type(value) == "string" then
+        return nil
+    end
+    return numeric
+end
+
 local function cfg_number(cfg, key, default_value)
-    local value = tonumber(cfg[key])
+    local options = NUMBER_OPTION_VALUES[key]
+    local index = options and option_index(cfg[key], options)
+    local value = index and options[index] or tonumber(cfg[key])
     if value == nil then
         return default_value
     end
@@ -47,7 +91,47 @@ local function enabled_value(value, default_value)
 end
 
 local function cfg_enabled(cfg, key, default_value)
+    local options = BOOLEAN_OPTION_VALUES[key]
+    local index = options and option_index(cfg[key], options)
+    if index then
+        return options[index]
+    end
     return enabled_value(cfg[key], default_value)
+end
+
+local function normalize_repetition_guard_mode(value, default_value)
+    if value == nil or value == "" then
+        return default_value
+    end
+    local index = option_index(value, REPETITION_GUARD_OPTION_VALUES)
+    if index then
+        return REPETITION_GUARD_OPTION_VALUES[index]
+    end
+    local text = string.lower(tostring(value))
+    if text == "off" or text == "false" or text == "0" or text == "no" or text == "关闭" then
+        return "off"
+    end
+    if text == "warn" or text == "soft" or text == "提示" or text == "仅提醒" or text == "提醒" then
+        return "warn"
+    end
+    if text == "block" or text == "true" or text == "1" or text == "on" or text == "yes" or text == "开启" or text == "强制拦截" or text == "拦截" then
+        return "block"
+    end
+    return default_value
+end
+
+local function cfg_repetition_guard_mode(cfg, default_value)
+    if cfg["重复动作保护"] == nil and cfg["启用重复动作保护"] ~= nil then
+        if enabled_value(cfg["启用重复动作保护"], false) then
+            return "block"
+        end
+        return "off"
+    end
+    local index = option_index(cfg["重复动作保护"], REPETITION_GUARD_OPTION_VALUES)
+    if index then
+        return REPETITION_GUARD_OPTION_VALUES[index]
+    end
+    return normalize_repetition_guard_mode(cfg["重复动作保护"], default_value)
 end
 
 local function decode_spawn_args(args)
@@ -81,6 +165,22 @@ end
 local function merge_boolean_arg(config, args, key)
     if args[key] ~= nil then
         config[key] = enabled_value(args[key], config[key])
+    end
+end
+
+local function merge_repetition_guard_arg(config, args)
+    if args.repetition_guard_mode ~= nil then
+        config.repetition_guard_mode = normalize_repetition_guard_mode(args.repetition_guard_mode, config.repetition_guard_mode)
+        config.enable_repetition_guard = config.repetition_guard_mode == "block"
+        return
+    end
+    if args.enable_repetition_guard ~= nil then
+        if enabled_value(args.enable_repetition_guard, false) then
+            config.repetition_guard_mode = "block"
+        else
+            config.repetition_guard_mode = "off"
+        end
+        config.enable_repetition_guard = config.repetition_guard_mode == "block"
     end
 end
 
@@ -154,6 +254,8 @@ function M.normalize(config)
     if config.state_compression_max_chars < 500 then
         config.state_compression_max_chars = 500
     end
+    config.repetition_guard_mode = normalize_repetition_guard_mode(config.repetition_guard_mode, "warn")
+    config.enable_repetition_guard = config.repetition_guard_mode == "block"
     config.ui_element_observation_max_elements = tonumber(config.ui_element_observation_max_elements) or 80
     config.ui_element_observation_max_chars = tonumber(config.ui_element_observation_max_chars) or 12000
     if config.ui_element_observation_max_elements < 1 then
@@ -193,6 +295,7 @@ function M.from_ui(cfg)
         state_compression_recent_window = cfg_number(cfg, "压缩保留最近步数", 6),
         state_compression_max_chars = cfg_number(cfg, "压缩状态最大字符数", 3000),
         save_screenshots = cfg_enabled(cfg, "保存每步截图", false),
+        repetition_guard_mode = cfg_repetition_guard_mode(cfg, "warn"),
         enable_ui_element_observation = cfg_enabled(cfg, "每帧提供文本元素列表", false),
         ui_element_observation_max_elements = 80,
         ui_element_observation_max_chars = 12000,
@@ -251,6 +354,7 @@ function M.merge_launch_args(config)
     merge_boolean_arg(config, args, "enable_state_compression")
     merge_boolean_arg(config, args, "enable_ui_element_observation")
     merge_boolean_arg(config, args, "save_screenshots")
+    merge_repetition_guard_arg(config, args)
     M.normalize(config)
 end
 
