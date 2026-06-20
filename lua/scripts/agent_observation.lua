@@ -25,13 +25,6 @@ local TOGGLE_STATE_VALUES = {
     ["1"] = true,
 }
 
-local function now_ms()
-    if sys and sys.mtime then
-        return sys.mtime()
-    end
-    return math.floor(os.time() * 1000)
-end
-
 local function limit_text(text, max_chars)
     text = tostring(text or "")
     if #text <= max_chars then
@@ -274,6 +267,22 @@ local function action_box(frame, width, height)
     }
 end
 
+local function point_in_box(x, y, box)
+    return type(box) == "table"
+        and x >= (tonumber(box.x1) or 0)
+        and x <= (tonumber(box.x2) or 0)
+        and y >= (tonumber(box.y1) or 0)
+        and y <= (tonumber(box.y2) or 0)
+end
+
+local function box_area(box)
+    if type(box) ~= "table" then
+        return 1000000
+    end
+    return math.max(1, ((tonumber(box.x2) or 0) - (tonumber(box.x1) or 0)))
+        * math.max(1, ((tonumber(box.y2) or 0) - (tonumber(box.y1) or 0)))
+end
+
 local function slim_element(item, index, width, height)
     if type(item) ~= "table" then
         return nil
@@ -353,14 +362,14 @@ function M.capture(config)
         return nil
     end
 
-    local started = now_ms()
+    local started = sys.mtime()
     local ok, elements = pcall(function()
         return UiElement.list_text_elements({
             max_level = 2,
             max_elements = config.ui_element_observation_max_elements,
         })
     end)
-    local elapsed = now_ms() - started
+    local elapsed = sys.mtime() - started
     if not ok then
         return nil
     end
@@ -368,30 +377,21 @@ function M.capture(config)
         return nil
     end
 
-    local size_ok, width, height = pcall(function()
-        return screen.size()
-    end)
-    if not size_ok then
-        return nil
-    end
-    local compact_ok, slim, source_count, filtered_count, truncated = pcall(compact_elements, elements, config.ui_element_observation_max_elements, width, height)
-    if not compact_ok then
-        return nil
-    end
+    local width, height = screen.size()
+    local slim, source_count, filtered_count, truncated = compact_elements(elements, config.ui_element_observation_max_elements, width, height)
     local payload = {
         coordinate = "all point/box coordinates are 0-1000 action coordinates",
         count = #slim,
         truncated = truncated,
         elements = slim,
     }
-    local encode_ok, text = pcall(function()
-        return json.encode(payload)
-    end)
-    if not encode_ok or type(text) ~= "string" or text == "" then
+    local text = json.encode(payload)
+    if type(text) ~= "string" or text == "" then
         return nil
     end
     text = limit_text(text, config.ui_element_observation_max_chars)
     return {
+        payload = payload,
         json = text,
         count = #slim,
         source_count = source_count,
@@ -399,6 +399,24 @@ function M.capture(config)
         truncated = truncated or #text >= config.ui_element_observation_max_chars,
         elapsed_ms = elapsed,
     }
+end
+
+function M.text_at_point(observation, x, y)
+    if type(observation) ~= "table" or type(observation.payload) ~= "table" or type(observation.payload.elements) ~= "table" then
+        return nil
+    end
+    local best_text, best_area
+    for _, element in ipairs(observation.payload.elements) do
+        local text = string_value(element.text or element.value)
+        if text and point_in_box(x, y, element.box) then
+            local area = box_area(element.box)
+            if not best_area or area < best_area then
+                best_text = text
+                best_area = area
+            end
+        end
+    end
+    return best_text
 end
 
 function M.to_prompt(observation)

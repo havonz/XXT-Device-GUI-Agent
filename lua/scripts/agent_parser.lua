@@ -10,7 +10,6 @@ local ACTION_TYPES = {
     "INFO",
     "ABORT",
     "SLIDE",
-    "SCROLL",
     "LONGPRESS",
     "DOUBLECLICK",
     "LONGPRESS_DRAG",
@@ -93,14 +92,6 @@ local ACTION_EXTRA_FIELDS = {
     INFO = { "value", "text" },
     ABORT = { "value", "text" },
     HOTKEY = { "key", "value" },
-    SCROLL = { "direction", "point" },
-}
-
-local VALID_SCROLL_DIRECTIONS = {
-    up = true,
-    down = true,
-    left = true,
-    right = true,
 }
 
 local SIGNATURE_VALUE_ACTIONS = {
@@ -390,26 +381,42 @@ local function extract_json_object(text)
     return string.sub(text, start_idx, end_idx)
 end
 
+local function decoded_json_action_type(action)
+    if type(action) ~= "table" then
+        return nil
+    end
+    local raw_action = action.action or action.Action or action.action_type or action.type
+    local embedded = embedded_action_fields(raw_action)
+    if embedded and embedded.action then
+        raw_action = embedded.action
+    end
+    local action_type = normalize_action_type_value(first_token(raw_action))
+    if KNOWN_ACTION_TYPES[action_type] then
+        return action_type
+    end
+    return nil
+end
+
 function M.parse_action(model_text)
     local action, err = json.decode(model_text or "")
-    if action then
+    if decoded_json_action_type(action) then
         return action, nil
     end
     local extracted = extract_json_object(model_text)
     if extracted then
         action, err = json.decode(extracted)
-        if action then
+        if decoded_json_action_type(action) then
             return action, nil
         end
         local quote_normalized = string.gsub(extracted, "'", "\"")
         action, err = json.decode(quote_normalized)
-        if action then
+        if decoded_json_action_type(action) then
             return action, nil
         end
     end
     local quote_normalized = string.gsub(tostring(model_text or ""), "'", "\"")
     action, err = json.decode(quote_normalized)
-    if action then
+    if decoded_json_action_type(action) then
         return action, nil
     end
     action = parse_gelab_action(model_text)
@@ -504,9 +511,64 @@ local function action_field_markers(text)
     return markers, text
 end
 
+local function action_segment_text(text, markers, index)
+    local segment_end = #text
+    if markers[index + 1] then
+        segment_end = markers[index + 1].s - 1
+    end
+    return string.sub(text, markers[index].s, segment_end)
+end
+
+local function point_signature(point)
+    if type(point) ~= "table" then
+        return ""
+    end
+    local x = tonumber(point[1]) or tonumber(point.x)
+    local y = tonumber(point[2]) or tonumber(point.y)
+    if x == nil or y == nil then
+        return ""
+    end
+    return tostring(x) .. "," .. tostring(y)
+end
+
+local function text_signature(action, ...)
+    local value = M.field(action, ...)
+    if value == nil then
+        return ""
+    end
+    return trim(value)
+end
+
+local function action_duplicate_signature(action)
+    local action_type = M.normalize_action_type(M.field(action, "action", "Action", "action_type", "type"))
+    if action_type == "" then
+        return nil
+    end
+
+    local parts = { action_type }
+    if M.is_point_action(action_type) then
+        parts[#parts + 1] = point_signature(M.field(action, "point", "Point"))
+    elseif M.is_two_point_action(action_type) then
+        parts[#parts + 1] = point_signature(M.field(action, "point1", "Point1"))
+        parts[#parts + 1] = point_signature(M.field(action, "point2", "Point2"))
+    elseif action_type == "HOTKEY" then
+        parts[#parts + 1] = text_signature(action, "key", "Key", "value", "Value")
+    elseif action_type == "COMPLETE" then
+        parts[#parts + 1] = text_signature(action, "return", "Return", "value", "Value")
+    elseif action_type == "INFO" or action_type == "ABORT" then
+        parts[#parts + 1] = text_signature(action, "value", "Value", "text", "Text", "explain", "Explain", "summary", "Summary")
+    elseif action_type == "OPENURL" then
+        parts[#parts + 1] = text_signature(action, "value", "Value", "url", "URL")
+    elseif action_type == "TYPE" or action_type == "AWAKE" or action_type == "WAIT" then
+        parts[#parts + 1] = text_signature(action, "value", "Value", "text", "Text", "duration", "seconds")
+    end
+    return table.concat(parts, "\t")
+end
+
 local function multiple_action_fields_error(model_text)
     local markers, text = action_field_markers(model_text)
     local action_types = {}
+    local signatures = {}
     for i, marker in ipairs(markers) do
         local value_start = marker.e + 1
         local value_end = #text
@@ -516,11 +578,28 @@ local function multiple_action_fields_error(model_text)
         local action_type = action_type_from_field_value(string.sub(text, value_start, value_end))
         if action_type then
             action_types[#action_types + 1] = action_type
+            local action = parse_gelab_action(action_segment_text(text, markers, i))
+            signatures[#signatures + 1] = action_duplicate_signature(action) or action_type
         end
     end
     if #action_types <= 1 then
         return nil
     end
+
+    -- Some smaller models repeat the exact same action line after key_process.
+    -- Treat that as a formatting echo, while still rejecting conflicting actions.
+    local first_signature = signatures[1]
+    local same_action = first_signature ~= nil
+    for i = 2, #signatures do
+        if signatures[i] ~= first_signature then
+            same_action = false
+            break
+        end
+    end
+    if same_action then
+        return nil
+    end
+
     return "multiple action fields: " .. table.concat(action_types, ", ") .. "; output exactly one action field"
 end
 
@@ -609,11 +688,6 @@ function M.validate_action(action)
     elseif M.is_two_point_action(action_type) then
         if not has_point(M.field(action, "point1", "Point1")) or not has_point(M.field(action, "point2", "Point2")) then
             return false, action_type .. " missing point1/point2"
-        end
-    elseif action_type == "SCROLL" then
-        local direction = string.lower(tostring(M.field(action, "direction", "Direction") or ""))
-        if direction ~= "" and not VALID_SCROLL_DIRECTIONS[direction] then
-            return false, "invalid scroll direction"
         end
     elseif VALUE_REQUIRED_ACTIONS[action_type] then
         local value = M.action_value(action)

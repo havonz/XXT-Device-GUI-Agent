@@ -1,7 +1,7 @@
 {
   "ScriptInfo": {
     "Name": "XXT-Device-GUI-Agent",
-    "Version": "0.0.4",
+    "Version": "0.0.5",
     "Developer": "havonz",
     "Instructions": "使用 XXTouch 脚本实现的基于外部视觉模型设备日常界面操作 Agent"
   },

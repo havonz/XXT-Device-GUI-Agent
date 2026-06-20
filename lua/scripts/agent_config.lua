@@ -50,21 +50,48 @@ local function cfg_enabled(cfg, key, default_value)
     return enabled_value(cfg[key], default_value)
 end
 
-local function now_ms_value()
-    if sys and sys.mtime then
-        return sys.mtime()
+local function decode_spawn_args(args)
+    if type(args) ~= "table" then
+        return args
     end
-    return math.floor(os.time() * 1000)
+    local raw = args.spawn_args
+    if type(raw) ~= "string" or raw == "" then
+        return args
+    end
+    local decoded = json.decode(raw)
+    if type(decoded) ~= "table" then
+        return args
+    end
+    for key, value in pairs(args) do
+        if key ~= "spawn_args" and decoded[key] == nil then
+            decoded[key] = value
+        end
+    end
+    return decoded
+end
+
+local function merge_number_arg(config, args, key, transform)
+    local value = tonumber(args[key])
+    if value == nil then
+        return
+    end
+    config[key] = transform and transform(value) or value
+end
+
+local function merge_boolean_arg(config, args, key)
+    if args[key] ~= nil then
+        config[key] = enabled_value(args[key], config[key])
+    end
+end
+
+local function merge_non_empty_string_arg(config, args, key)
+    if type(args[key]) == "string" and args[key] ~= "" then
+        config[key] = args[key]
+    end
 end
 
 local function make_session_id()
-    if utils and utils.gen_uuid then
-        local uuid = utils.gen_uuid()
-        if type(uuid) == "string" and uuid ~= "" then
-            return os.date("%Y%m%d-%H%M%S") .. "-" .. uuid
-        end
-    end
-    return os.date("%Y%m%d-%H%M%S") .. "-" .. tostring(now_ms_value())
+    return os.date("%Y%m%d-%H%M%S") .. "-" .. utils.gen_uuid()
 end
 
 function M.normalize(config)
@@ -94,6 +121,26 @@ function M.normalize(config)
     end
     if config.coordinate_retry_count < 0 then
         config.coordinate_retry_count = 0
+    end
+    config.bad_action_retry_count = tonumber(config.bad_action_retry_count) or 2
+    if config.bad_action_retry_count < 0 then
+        config.bad_action_retry_count = 0
+    end
+    config.premature_info_retry_count = tonumber(config.premature_info_retry_count) or 1
+    if config.premature_info_retry_count < 0 then
+        config.premature_info_retry_count = 0
+    end
+    config.search_exploration_retry_count = tonumber(config.search_exploration_retry_count) or 1
+    if config.search_exploration_retry_count < 0 then
+        config.search_exploration_retry_count = 0
+    end
+    config.ineffective_action_retry_count = tonumber(config.ineffective_action_retry_count) or 1
+    if config.ineffective_action_retry_count < 0 then
+        config.ineffective_action_retry_count = 0
+    end
+    config.search_slide_threshold = tonumber(config.search_slide_threshold) or 3
+    if config.search_slide_threshold < 1 then
+        config.search_slide_threshold = 1
     end
     if config.recent_history_steps < 1 then
         config.recent_history_steps = 1
@@ -135,6 +182,11 @@ function M.from_ui(cfg)
         parse_retry_count = cfg_number(cfg, "解析失败重问次数", 8),
         parse_context_reset_count = cfg_number(cfg, "解析失败清上下文阈值", 3),
         coordinate_retry_count = cfg_number(cfg, "坐标缺失重问次数", 3),
+        bad_action_retry_count = 2,
+        premature_info_retry_count = 1,
+        search_exploration_retry_count = 1,
+        ineffective_action_retry_count = 1,
+        search_slide_threshold = 3,
         recent_history_steps = cfg_number(cfg, "最近历史保留步数", 8),
         enable_state_compression = cfg_enabled(cfg, "启用历史压缩", true),
         state_compression_interval = cfg_number(cfg, "历史压缩间隔步数", 10),
@@ -147,6 +199,7 @@ function M.from_ui(cfg)
         click_loop_threshold = 3,
         slide_loop_threshold = 5,
         same_action_loop_threshold = 4,
+        action_cycle_threshold = 3,
         session_id = make_session_id(),
         log_root = XXT_LOG_PATH .. "/gelab-xxt-device-agent",
     }
@@ -157,60 +210,48 @@ function M.from_ui(cfg)
 end
 
 function M.merge_launch_args(config)
-    if not utils or not utils.launch_args then
-        return
-    end
     local args = utils.launch_args()
     if type(args) ~= "table" then
         return
     end
-    if type(args.task) == "string" and args.task ~= "" then
-        config.task = args.task
-    end
-    if tonumber(args.max_steps) then
-        config.max_steps = tonumber(args.max_steps)
-    end
-    if tonumber(args.temperature) then
-        config.temperature = tonumber(args.temperature)
-    end
-    if tonumber(args.max_tokens) then
-        config.max_tokens = tonumber(args.max_tokens)
-    end
-    if type(args.model_url) == "string" and args.model_url ~= "" then
-        config.model_url = args.model_url
-    end
-    if type(args.model) == "string" and args.model ~= "" then
-        config.model = args.model
-    end
+    args = decode_spawn_args(args)
+    merge_non_empty_string_arg(config, args, "task")
+    merge_non_empty_string_arg(config, args, "model_url")
+    merge_non_empty_string_arg(config, args, "model")
     if type(args.api_key) == "string" then
         config.api_key = args.api_key
     end
-    if tonumber(args.assist_timeout) then
-        config.assist_timeout = tonumber(args.assist_timeout)
-    end
-    if tonumber(args.recent_history_steps) then
-        config.recent_history_steps = tonumber(args.recent_history_steps)
-    end
-    if tonumber(args.coordinate_retry_count) then
-        config.coordinate_retry_count = tonumber(args.coordinate_retry_count)
-    end
-    if tonumber(args.parse_retry_count) then
-        config.parse_retry_count = tonumber(args.parse_retry_count)
-    end
-    if tonumber(args.parse_context_reset_count) then
-        config.parse_context_reset_count = tonumber(args.parse_context_reset_count)
-    end
-    if args.enable_state_compression ~= nil then
-        config.enable_state_compression = enabled_value(args.enable_state_compression, config.enable_state_compression)
-    end
-    if args.enable_ui_element_observation ~= nil then
-        config.enable_ui_element_observation = enabled_value(args.enable_ui_element_observation, config.enable_ui_element_observation)
-    end
-    M.normalize(config)
-end
 
-function M.now_ms()
-    return now_ms_value()
+    merge_number_arg(config, args, "max_steps")
+    merge_number_arg(config, args, "temperature")
+    merge_number_arg(config, args, "max_tokens")
+    merge_number_arg(config, args, "request_timeout")
+    merge_number_arg(config, args, "image_quality", function(quality)
+        if quality > 1 then
+            quality = quality / 100
+        end
+        return quality
+    end)
+    merge_number_arg(config, args, "delay_after_action_ms")
+    merge_number_arg(config, args, "assist_timeout")
+    merge_number_arg(config, args, "recent_history_steps")
+    merge_number_arg(config, args, "coordinate_retry_count")
+    merge_number_arg(config, args, "model_retry_count")
+    merge_number_arg(config, args, "format_repair_retry_count")
+    merge_number_arg(config, args, "bad_action_retry_count")
+    merge_number_arg(config, args, "premature_info_retry_count")
+    merge_number_arg(config, args, "search_exploration_retry_count")
+    merge_number_arg(config, args, "ineffective_action_retry_count")
+    merge_number_arg(config, args, "search_slide_threshold")
+    merge_number_arg(config, args, "parse_retry_count")
+    merge_number_arg(config, args, "parse_context_reset_count")
+    merge_number_arg(config, args, "ui_element_observation_max_elements")
+    merge_number_arg(config, args, "ui_element_observation_max_chars")
+
+    merge_boolean_arg(config, args, "enable_state_compression")
+    merge_boolean_arg(config, args, "enable_ui_element_observation")
+    merge_boolean_arg(config, args, "save_screenshots")
+    M.normalize(config)
 end
 
 function M.append_log(config, record)

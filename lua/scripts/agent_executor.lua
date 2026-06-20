@@ -92,9 +92,7 @@ function M.capture_image_data_url(config, step)
         screenshot_path = config.screenshot_dir .. "/step_" .. tostring(step) .. ".jpg"
         file.writes(screenshot_path, jpg)
     end
-    if img.destroy then
-        img:destroy()
-    end
+    img:destroy()
     return "data:image/jpeg;base64," .. jpg:base64_encode(), screenshot_path
 end
 
@@ -400,13 +398,6 @@ local function try_sys_input_text(text)
     return false, tostring(err)
 end
 
-local SCROLL_OFFSETS = {
-    down = { dx = 0, dy = -1 },
-    up = { dx = 0, dy = 1 },
-    left = { dx = -1, dy = 0 },
-    right = { dx = 1, dy = 0 },
-}
-
 local HOTKEY_CODES = {
     HOME = "HOMEBUTTON",
     HOMEBUTTON = "HOMEBUTTON",
@@ -466,23 +457,6 @@ local function handle_longpress_drag(ctx, action)
     sys.msleep(200)
     touch.off(1, x1, y1)
     return false, { executed = "long_press_drag", x0 = x0, y0 = y0, x1 = x1, y1 = y1 }
-end
-
-local function handle_scroll(ctx, action)
-    local point = Parser.field(action, "point", "Point") or { 500, 500 }
-    local x, y = scale_point(point, ctx.width, ctx.height)
-    local direction = string.lower(tostring(Parser.field(action, "direction", "Direction") or "down"))
-    local offset = SCROLL_OFFSETS[direction]
-    if not offset then
-        return true, { error = "invalid scroll direction: " .. direction }
-    end
-
-    local dx = math.floor(ctx.width * 0.30)
-    local dy = math.floor(ctx.height * 0.30)
-    local x1 = clamp(x + offset.dx * dx, 0, ctx.width - 1)
-    local y1 = clamp(y + offset.dy * dy, 0, ctx.height - 1)
-    swipe_pixels(x, y, x1, y1)
-    return false, { executed = "scroll", direction = direction, x0 = x, y0 = y, x1 = x1, y1 = y1 }
 end
 
 local function handle_type(ctx, action)
@@ -601,7 +575,6 @@ local ACTION_HANDLERS = {
     LONGPRESS = handle_longpress,
     SLIDE = handle_slide,
     LONGPRESS_DRAG = handle_longpress_drag,
-    SCROLL = handle_scroll,
     TYPE = handle_type,
     AWAKE = handle_awake,
     OPENURL = handle_openurl,

@@ -7,6 +7,7 @@ local Memory = require("agent_memory")
 local Model = require("agent_model")
 local Observation = require("agent_observation")
 local Parser = require("agent_parser")
+local Policy = require("agent_task_policy")
 local Ui = require("agent_ui")
 
 while not LCC.connect() do
@@ -54,7 +55,7 @@ end
 
 local function append_step_log(step, model_text, repaired_text, screenshot_path, observation_meta, action, original_action, execution)
     Config.append_log(CONFIG, {
-        time = Config.now_ms(),
+        time = sys.mtime(),
         type = "step",
         step = step,
         action = action,
@@ -103,9 +104,7 @@ local function coordinate_retry_failed_action(parse_err, retry_count, action_typ
     }
 end
 
-local function parse_retry_history()
-    return "已清空历史上下文。前文可能干扰了动作格式，请只根据用户目标和当前截图继续决策。"
-end
+local PARSE_RESET_HISTORY = "已清空历史上下文。前文可能干扰了动作格式，请只根据用户目标和当前截图继续决策。"
 
 local function parse_retry_instruction(parse_err, model_text, retry_index, context_reset)
     local reset_text = ""
@@ -142,6 +141,306 @@ local function parse_retry_failed_action(parse_err, retry_count)
     }
 end
 
+local fallback_search_slide_action
+
+local function clicked_lower_screen(action)
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type ~= "CLICK" and action_type ~= "DOUBLECLICK" and action_type ~= "LONGPRESS" then
+        return false
+    end
+    local _, y = Parser.point_value(Parser.field(action, "point", "Point"))
+    return y ~= nil and y >= 350
+end
+
+local function bad_action_retry_instruction(reason, action, retry_index)
+    local extra = ""
+    if clicked_lower_screen(action) then
+        extra = "\n- 这个错误动作点在列表主体区域，可能点到了目标之外的其它列表项。返回列表后如果目标文字不可见，不要再猜测点击其它行；优先查看上方内容：使用 action:SLIDE\tpoint1:500,250\tpoint2:500,850。"
+    end
+    return [[
+候选动作被错误记忆拦截，不能执行。
+原因：]] .. tostring(reason or "该动作此前导致错误页面或未达预期") .. [[
+
+被拦截动作：]] .. Memory.action_signature(action) .. [[
+
+请重新观察当前截图，继续完成用户目标，但必须换一个方案：
+- 不要重复这个动作、点位或入口。
+- 如果目标文字当前清楚可见，才点击目标文字所在行。
+- 如果目标文字不可见，禁止按大概位置猜测点击；必须使用 SLIDE 查找，先根据当前列表已经滚到上方还是下方选择方向。]] .. extra .. [[
+- 如果无法可靠判断，输出 action:INFO 并给出具体 value 请求人工协助。
+
+这是第 ]] .. tostring(retry_index) .. [[ 次错误动作重问。
+]]
+end
+
+local function bad_action_retry_failed_action(config, memory, reason, action, retry_count)
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type == "SLIDE" then
+        local x1, y1 = Parser.point_value(Parser.field(action, "point1", "Point1"))
+        local x2, y2 = Parser.point_value(Parser.field(action, "point2", "Point2"))
+        if x1 and y1 and x2 and y2 then
+            local reversed = {
+                action = "SLIDE",
+                point1 = { x2, y2 },
+                point2 = { x1, y1 },
+                verify = "候选滑动方向已经被错误记忆拦截，改用反方向验证。",
+                note = "不再重复同方向滑动，改用反方向继续探索。",
+                explain = "模型多次重复已知错误滑动，自动换成反方向 SLIDE。",
+                key_process = "反方向滑动验证可滚动区域",
+                summary = "因已知错误滑动重复，改用反方向 SLIDE。原因：" .. tostring(reason or "错误动作重复"),
+            }
+            if not Memory.would_repeat_ineffective_action(config, memory, reversed) then
+                return reversed
+            end
+        end
+    end
+    if Policy.task_requests_search(config) and action_type ~= "SLIDE" then
+        return fallback_search_slide_action("模型多次提出已知错误点击；当前目标不可见时不应继续猜点，改为查看上方列表内容。原原因：" .. tostring(reason or "错误动作重复"), config, memory, "up")
+    end
+    local value = "模型连续 " .. tostring(retry_count) .. " 次提出已知错误动作。为避免重复进入错误页面，请人工确认当前页面后点击完成。原因：" .. tostring(reason or "错误动作重复")
+    return {
+        action = "INFO",
+        value = value,
+        explain = "错误动作多次重复，停止自动重问并转人工确认。",
+        summary = "因错误动作重复转人工确认。",
+    }
+end
+
+local function click_hits_unrelated_visible_text(config, action, observation)
+    if not Policy.task_requests_search(config) then
+        return nil
+    end
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type ~= "CLICK" and action_type ~= "DOUBLECLICK" and action_type ~= "LONGPRESS" then
+        return nil
+    end
+    local x, y = Parser.point_value(Parser.field(action, "point", "Point"))
+    if not x or not y then
+        return nil
+    end
+    local text = Observation.text_at_point(observation, x, y)
+    if Policy.action_context_requests_return(action) then
+        if x <= 250 and y <= 160 then
+            return nil
+        end
+        if text == "设置" or text == "返回" or text == "Back" then
+            return nil
+        end
+    end
+    if not text or text == "" then
+        return nil
+    end
+    if Policy.task_contains_visible_text(config, text) then
+        return nil
+    end
+    return "候选点击命中了当前可见文本“" .. text .. "”，但用户任务中没有这个目标；这很可能是在列表中猜点点到了无关条目。应先 SLIDE 查找任务中明确出现的目标文字。"
+end
+
+local function search_exploration_reason(config, memory, model_text, action)
+    if not Policy.task_requests_search(config) then
+        return nil
+    end
+    local action_type = action and Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) or ""
+    if Policy.complete_has_result(action) then
+        return nil
+    end
+    local text = tostring(model_text or "") .. " " .. Policy.action_text(action)
+    if Policy.contains_sensitive_request(text) then
+        return nil
+    end
+    if action_type == "SLIDE" then
+        return nil
+    end
+    local has_miss = Policy.has_search_miss(text)
+    local gives_up = Policy.has_search_give_up(text)
+    if not has_miss and not gives_up then
+        return nil
+    end
+    if action_type == "INFO" or action_type == "ABORT" or action_type == "COMPLETE" or gives_up then
+        return "搜索任务尚未证明已穷尽，但模型正在得出找不到或不能继续探索的结论。只要页面仍可能向下或向上翻，就应该继续探索；只有滑动到边界或同方向滑动进入无效循环后，才允许转人工或报告找不到。"
+    end
+    return nil
+end
+
+local function recent_slide_count(memory)
+    local records = (memory and memory.records) or {}
+    local count = 0
+    for i = #records, 1, -1 do
+        local prev_type = Parser.normalize_action_type(Parser.field(records[i].action, "action", "Action", "action_type", "type"))
+        if prev_type == "SLIDE" then
+            count = count + 1
+        else
+            break
+        end
+    end
+    return count
+end
+
+local function premature_info_reason(config, memory, action)
+    if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) ~= "INFO" then
+        return nil
+    end
+    if not Policy.task_requests_search(config) then
+        return nil
+    end
+    local info_text = Policy.action_text(action)
+    if Policy.contains_sensitive_request(info_text) then
+        return nil
+    end
+    if not Policy.text_contains_any(info_text, { "未找到", "没有找到", "找不到", "无法找到", "没发现", "继续寻找", "继续滚动", "继续翻", "请问", "确认下一步" }) then
+        return nil
+    end
+    local slides = recent_slide_count(memory)
+    local threshold = math.max(tonumber(config.search_slide_threshold) or 3, 1)
+    if slides >= threshold then
+        return nil
+    end
+    return "当前任务是查找信息，候选 INFO 只是因为当前可视区域未找到目标；最近仅连续滑动 " .. tostring(slides) .. " 次，未达到查找阈值 " .. tostring(threshold) .. " 次。应继续向下滑动查找，而不是询问用户。"
+end
+
+local function premature_info_retry_instruction(reason, retry_index)
+    return [[
+候选 INFO 被拦截，当前不应请求人工。
+原因：]] .. tostring(reason or "当前只是未在可视区域找到目标") .. [[
+
+请重新观察当前截图并继续完成任务：
+- 如果目标文字或结果当前可见，点击或 COMPLETE。
+- 如果目标仍不可见，继续使用 SLIDE 向下查找。
+- “当前可视区域未找到”不等于任务失败；列表可能需要翻多页。
+- 只有已经到达列表底部、连续多次滑动无变化、遇到敏感输入/登录/验证码，才使用 INFO。
+
+这是第 ]] .. tostring(retry_index) .. [[ 次过早 INFO 重问。
+]]
+end
+
+local function normalize_search_direction(direction)
+    if direction == "up" or direction == "reveal_above" then
+        return "reveal_above"
+    end
+    return "reveal_below"
+end
+
+local function opposite_search_direction(direction)
+    direction = normalize_search_direction(direction)
+    return direction == "reveal_above" and "reveal_below" or "reveal_above"
+end
+
+local function search_slide_action(reason, direction)
+    direction = normalize_search_direction(direction)
+    local point1 = { 500, 850 }
+    local point2 = { 500, 250 }
+    local direction_text = "向下滚动"
+    local gesture_text = "手指向上滑动，露出下方内容"
+    if direction == "reveal_above" then
+        point1 = { 500, 250 }
+        point2 = { 500, 850 }
+        direction_text = "向上滚动"
+        gesture_text = "手指向下滑动，露出上方内容"
+    end
+    return {
+        action = "SLIDE",
+        point1 = point1,
+        point2 = point2,
+        verify = "上一步未在当前可视区域找到目标，但这不代表任务失败。",
+        note = "继续" .. direction_text .. "查找目标信息；" .. gesture_text .. "。",
+        explain = "当前是查找类任务，可能需要翻多页或反向检查，因此自动继续探索。",
+        key_process = "继续翻页查找目标信息",
+        summary = "因搜索未穷尽的结论被拦截，继续" .. direction_text .. "查找。原因：" .. tostring(reason or "目标尚未出现"),
+    }
+end
+
+fallback_search_slide_action = function(reason, config, memory, preferred_direction)
+    local directions = {}
+    if preferred_direction then
+        local normalized = normalize_search_direction(preferred_direction)
+        directions[#directions + 1] = normalized
+        directions[#directions + 1] = opposite_search_direction(normalized)
+    else
+        directions[#directions + 1] = "reveal_below"
+        directions[#directions + 1] = "reveal_above"
+    end
+    for _, direction in ipairs(directions) do
+        local slide_action = search_slide_action(reason, direction)
+        if not Memory.would_repeat_ineffective_action(config, memory, slide_action) then
+            return slide_action
+        end
+    end
+    return {
+        action = "INFO",
+        value = "已尝试继续探索，但向下和向上滑动都可能进入无效循环。请人工确认当前页面是否还有可滚动内容，完成后点击完成。原因：" .. tostring(reason or "搜索探索已受限"),
+        explain = "搜索探索方向都进入无效循环，转人工确认。",
+        summary = "因上下方向探索都受限转人工确认。",
+    }
+end
+
+local function search_exploration_retry_instruction(reason, retry_index)
+    return [[
+候选结论被拦截，当前不能直接说找不到。
+原因：]] .. tostring(reason or "搜索尚未穷尽") .. [[
+
+请重新观察当前截图并继续完成任务：
+- 如果目标文字或目标值当前可见，点击对应项或 COMPLETE。
+- 如果目标不可见，但页面可能还能向下或向上翻，必须使用 SLIDE 继续探索。
+- 不要把“当前可见区域没看到”当成“整个页面不存在”。
+- 如果刚才向下滑动后没有变化，尝试反方向或更短距离验证边界；如果仍不能滚动，再用 INFO 请求人工。
+- 不要输出“继续滚动无效”“请求进一步指示”“找不到”之类结论，除非已经证明上下方向都不可继续。
+
+这是第 ]] .. tostring(retry_index) .. [[ 次搜索探索重问。
+]]
+end
+
+local function ineffective_action_retry_instruction(reason, action, retry_index)
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    local extra = ""
+    if action_type == "SLIDE" then
+        extra = "\n- 刚刚这个 SLIDE 执行后界面没有发生有效变化，说明这个滑动方向/幅度可能无效；不要重复同方向同距离 SLIDE，优先尝试反方向、缩短或改变滑动幅度、点击当前可见的其它入口，或返回上级重新定位。"
+    else
+        extra = "\n- 刚刚这个操作执行后界面没有发生有效变化，目标可能只是状态文字、静态字段或禁用项；不要再次操作同一位置或同一控件，改点其它可见入口、返回上级或换一种操作。"
+        if Policy.action_context_requests_return(action) then
+            extra = extra .. "\n- 如果当前是在错误页面且需要返回，但可见返回按钮点位不可靠，可以改用 action:BACK 返回上一页。"
+        end
+    end
+    return [[
+候选动作被无效循环拦截，暂不执行。
+原因：]] .. tostring(reason or "该动作已重复执行但没有产生有效进展") .. [[
+
+被拦截动作：]] .. Memory.action_signature(action) .. [[
+
+请重新观察当前截图，继续完成用户目标，但必须换一个方案：
+- 不要重复这个动作签名、相同点位、相同滑动方向或相同按键。
+- 先判断上一步操作之后界面有没有变化；如果没有变化，本轮必须转换思路，尝试其它操作。
+- 不要把静态标签、字段值、状态文字当成按钮。
+- 如果目标文字当前可见且可点击，点击对应行的可交互区域；如果不可见，使用合适方向的 SLIDE 查找。]] .. extra .. [[
+- 如果无法可靠判断下一步，输出 action:INFO 并说明当前被哪个无效动作卡住。
+
+这是第 ]] .. tostring(retry_index) .. [[ 次无效动作重问。
+]]
+end
+
+local function ineffective_action_failed_action(config, memory, reason, action, retry_count)
+    local action_type = Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
+    if action_type ~= "SLIDE" and Policy.action_context_requests_return(action) then
+        return {
+            action = "BACK",
+            verify = "候选动作重复无效，且当前上下文显示需要从错误页面返回。",
+            note = "使用系统返回手势回到上一页，再重新规划。",
+            explain = "模型已多次尝试同一无效点位返回，改用 BACK 避免继续误点。",
+            key_process = "从错误页面返回上一页",
+            summary = "因无效动作循环且上下文要求返回，改用 BACK。原因：" .. tostring(reason or "无效动作循环"),
+        }
+    end
+    if Policy.task_requests_search(config) and action_type ~= "SLIDE" then
+        return fallback_search_slide_action("候选动作重复无效，疑似把静态文字或状态字段当作按钮；改为继续滑动查找。原原因：" .. tostring(reason or "无效动作循环"), config, memory)
+    end
+    local value = "模型连续 " .. tostring(retry_count) .. " 次提出无效循环动作 " .. Memory.action_signature(action) .. "。为避免继续重复无效操作，请人工确认当前页面后点击完成。原因：" .. tostring(reason or "无效动作循环")
+    return {
+        action = "INFO",
+        value = value,
+        explain = "动作重复无效且自动换方案未恢复，停止继续执行同类动作。",
+        summary = "因无效动作循环转人工确认。",
+    }
+end
+
 local function make_guard_action(original_action, reason)
     return {
         action = "INFO",
@@ -154,19 +453,12 @@ local function make_guard_action(original_action, reason)
     }
 end
 
-local function action_type(action)
-    return Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type"))
-end
-
-local function is_complete_confirmation_pending(record)
-    return type(record) == "table"
-        and type(record.execution) == "table"
-        and record.execution.reason == "COMPLETE_CONFIRMATION_PENDING"
-end
-
 local function complete_needs_confirmation(memory)
     local records = (memory and memory.records) or {}
-    return not is_complete_confirmation_pending(records[#records])
+    local latest = records[#records]
+    return not (type(latest) == "table"
+        and type(latest.execution) == "table"
+        and latest.execution.reason == "COMPLETE_CONFIRMATION_PENDING")
 end
 
 local function complete_confirmation_execution(action)
@@ -182,7 +474,7 @@ local function write_session_start()
     sys.mkdir_p(CONFIG.log_dir)
     file.writes(CONFIG.log_dir .. "/session.jsonl", "")
     Config.append_log(CONFIG, {
-        time = Config.now_ms(),
+        time = sys.mtime(),
         type = "session_start",
         session_id = CONFIG.session_id,
         task = CONFIG.task,
@@ -194,6 +486,11 @@ local function write_session_start()
         parse_retry_count = CONFIG.parse_retry_count,
         parse_context_reset_count = CONFIG.parse_context_reset_count,
         coordinate_retry_count = CONFIG.coordinate_retry_count,
+        bad_action_retry_count = CONFIG.bad_action_retry_count,
+        premature_info_retry_count = CONFIG.premature_info_retry_count,
+        search_exploration_retry_count = CONFIG.search_exploration_retry_count,
+        ineffective_action_retry_count = CONFIG.ineffective_action_retry_count,
+        search_slide_threshold = CONFIG.search_slide_threshold,
         enable_state_compression = CONFIG.enable_state_compression,
         enable_ui_element_observation = CONFIG.enable_ui_element_observation,
         ui_element_observation_max_elements = CONFIG.ui_element_observation_max_elements,
@@ -203,7 +500,26 @@ end
 local function capture_frame(step)
     local image_data_url, screenshot_path = Executor.capture_image_data_url(CONFIG, step)
     local observation = Observation.capture(CONFIG)
-    return image_data_url, screenshot_path, Observation.to_prompt(observation), Observation.meta(observation)
+    return image_data_url, screenshot_path, Observation.to_prompt(observation), Observation.meta(observation), observation
+end
+
+local function update_last_screen_change(memory, current_screenshot_path)
+    local records = (memory and memory.records) or {}
+    local latest = records[#records]
+    if not latest or latest.screen_change or not latest.screenshot or not current_screenshot_path then
+        return nil
+    end
+    latest.screen_change = Memory.compare_screenshots(latest.screenshot, current_screenshot_path)
+    Config.append_log(CONFIG, {
+        time = sys.mtime(),
+        type = "screen_change",
+        step = latest.step,
+        action = latest.action,
+        before = latest.screenshot,
+        after = current_screenshot_path,
+        result = latest.screen_change,
+    })
+    return latest.screen_change
 end
 
 local function compress_if_needed(step, memory)
@@ -213,7 +529,7 @@ local function compress_if_needed(step, memory)
 
     local compression_err = Memory.compress(CONFIG, memory, call_text_model)
     Config.append_log(CONFIG, {
-        time = Config.now_ms(),
+        time = sys.mtime(),
         type = compression_err and "compression_error" or "compression",
         step = step,
         error = compression_err,
@@ -223,7 +539,8 @@ local function compress_if_needed(step, memory)
 end
 
 local function run_step(step, memory)
-    local image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(step)
+    local image_data_url, screenshot_path, observation_prompt, observation_meta, observation = capture_frame(step)
+    update_last_screen_change(memory, screenshot_path)
     local history = Memory.build_history(CONFIG, memory)
 
     local model_text, repaired_text, action, parse_err
@@ -233,22 +550,193 @@ local function run_step(step, memory)
     local last_missing_action_type = nil
     local consecutive_missing_count = 0
     local total_coordinate_retries = 0
-    local max_recovery_model_calls = math.max(CONFIG.coordinate_retry_count * 4 + 1, CONFIG.coordinate_retry_count + 2, CONFIG.parse_retry_count + 2)
+    local consecutive_bad_action_count = 0
+    local consecutive_premature_info_count = 0
+    local consecutive_search_exploration_count = 0
+    local consecutive_ineffective_action_count = 0
+    local max_recovery_model_calls = math.max(CONFIG.coordinate_retry_count * 4 + 1, CONFIG.coordinate_retry_count + 2, CONFIG.parse_retry_count + 2, CONFIG.bad_action_retry_count + 2, CONFIG.premature_info_retry_count + 2, CONFIG.search_exploration_retry_count + 2, CONFIG.ineffective_action_retry_count + 2)
+
+    local function reset_coordinate_retry_counts()
+        total_coordinate_retries = 0
+        last_missing_action_type = nil
+        consecutive_missing_count = 0
+    end
+
+    local function reset_recovery_counts(active)
+        if active ~= "parse" then
+            consecutive_parse_error_count = 0
+        end
+        if active ~= "coordinate" then
+            reset_coordinate_retry_counts()
+        end
+        if active ~= "bad_action" then
+            consecutive_bad_action_count = 0
+        end
+        if active ~= "premature_info" then
+            consecutive_premature_info_count = 0
+        end
+        if active ~= "search_exploration" then
+            consecutive_search_exploration_count = 0
+        end
+        if active ~= "ineffective_action" then
+            consecutive_ineffective_action_count = 0
+        end
+    end
+
+    local function prepare_retry_frame(label, instruction)
+        image_data_url, screenshot_path, observation_prompt, observation_meta, observation = capture_frame(label)
+        retry_instruction = instruction
+        sys.msleep(300)
+    end
+
     for model_call_index = 1, max_recovery_model_calls do
         local model_err
-        local active_history = use_parse_reset_history and parse_retry_history() or history
+        local active_history = use_parse_reset_history and PARSE_RESET_HISTORY or history
         model_text, model_err = Model.call_model(CONFIG, image_data_url, active_history, retry_instruction, observation_prompt)
         if model_err then
-            Config.append_log(CONFIG, { time = Config.now_ms(), type = "error", step = step, error = model_err })
+            Config.append_log(CONFIG, { time = sys.mtime(), type = "error", step = step, error = model_err })
             Ui.toast("Model error")
             return true, false, model_err
         end
 
         action, parse_err, repaired_text = Parser.parse_action_checked(CONFIG, call_text_model, model_text)
         if not parse_err then
-            break
+            action = Memory.sanitize_action(action)
+            local search_reason = search_exploration_reason(CONFIG, memory, model_text, action)
+            local bad_action_reason = nil
+            if not search_reason then
+                bad_action_reason = Memory.detect_bad_action_reuse(CONFIG, memory, action)
+            end
+            local early_info_reason = nil
+            if not search_reason and not bad_action_reason then
+                early_info_reason = premature_info_reason(CONFIG, memory, action)
+            end
+            local ineffective_action_reason = nil
+            if not search_reason and not bad_action_reason and not early_info_reason then
+                ineffective_action_reason = Memory.detect_ineffective_action_loop(CONFIG, memory, action)
+            end
+            if not search_reason and not bad_action_reason and not early_info_reason and not ineffective_action_reason then
+                break
+            end
+
+            if search_reason then
+                consecutive_search_exploration_count = consecutive_search_exploration_count + 1
+                if consecutive_search_exploration_count > CONFIG.search_exploration_retry_count or model_call_index >= max_recovery_model_calls then
+                    LCC.log(1, "模型过早得出找不到结论，改为继续探索：" .. tostring(search_reason))
+                    action = fallback_search_slide_action(search_reason, CONFIG, memory)
+                    repaired_text = nil
+                    break
+                end
+
+                reset_recovery_counts("search_exploration")
+                LCC.log(1, "模型搜索未穷尽就得出找不到结论，连续第 " .. tostring(consecutive_search_exploration_count) .. " 次，正在重问")
+                Config.append_log(CONFIG, {
+                    time = sys.mtime(),
+                    type = "search_exploration_retry",
+                    step = step,
+                    retry = consecutive_search_exploration_count,
+                    action = action,
+                    reason = search_reason,
+                    model_response = model_text,
+                    repaired_response = repaired_text,
+                })
+                prepare_retry_frame(tostring(step) .. "_search_exploration_" .. tostring(consecutive_search_exploration_count), search_exploration_retry_instruction(search_reason, consecutive_search_exploration_count))
+            elseif early_info_reason then
+                consecutive_premature_info_count = consecutive_premature_info_count + 1
+                if consecutive_premature_info_count > CONFIG.premature_info_retry_count or model_call_index >= max_recovery_model_calls then
+                    LCC.log(1, "模型过早请求人工，改为继续滑动查找：" .. tostring(early_info_reason))
+                    action = fallback_search_slide_action(early_info_reason, CONFIG, memory)
+                    repaired_text = nil
+                    break
+                end
+
+                reset_recovery_counts("premature_info")
+                LCC.log(1, "模型过早请求人工，连续第 " .. tostring(consecutive_premature_info_count) .. " 次，正在重问")
+                Config.append_log(CONFIG, {
+                    time = sys.mtime(),
+                    type = "premature_info_retry",
+                    step = step,
+                    retry = consecutive_premature_info_count,
+                    action = action,
+                    reason = early_info_reason,
+                    model_response = model_text,
+                    repaired_response = repaired_text,
+                })
+                prepare_retry_frame(tostring(step) .. "_premature_info_" .. tostring(consecutive_premature_info_count), premature_info_retry_instruction(early_info_reason, consecutive_premature_info_count))
+            elseif bad_action_reason then
+                consecutive_bad_action_count = consecutive_bad_action_count + 1
+                if consecutive_bad_action_count > CONFIG.bad_action_retry_count or model_call_index >= max_recovery_model_calls then
+                    action = bad_action_retry_failed_action(CONFIG, memory, bad_action_reason, action, consecutive_bad_action_count)
+                    if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) == "INFO" then
+                        LCC.log(1, "模型连续 " .. tostring(consecutive_bad_action_count) .. " 次提出已知错误动作，转人工确认：" .. tostring(bad_action_reason))
+                    else
+                        LCC.log(1, "模型连续 " .. tostring(consecutive_bad_action_count) .. " 次提出已知错误动作，改用保守恢复：" .. Memory.action_signature(action))
+                    end
+                    repaired_text = nil
+                    break
+                end
+
+                reset_recovery_counts("bad_action")
+                LCC.log(1, "模型提出已知错误动作，连续第 " .. tostring(consecutive_bad_action_count) .. " 次，正在重问")
+                Config.append_log(CONFIG, {
+                    time = sys.mtime(),
+                    type = "bad_action_retry",
+                    step = step,
+                    retry = consecutive_bad_action_count,
+                    action = action,
+                    reason = bad_action_reason,
+                    model_response = model_text,
+                    repaired_response = repaired_text,
+                })
+                prepare_retry_frame(tostring(step) .. "_bad_action_" .. tostring(consecutive_bad_action_count), bad_action_retry_instruction(bad_action_reason, action, consecutive_bad_action_count))
+            else
+                consecutive_ineffective_action_count = consecutive_ineffective_action_count + 1
+                if consecutive_ineffective_action_count > CONFIG.ineffective_action_retry_count or model_call_index >= max_recovery_model_calls then
+                    LCC.log(1, "模型连续 " .. tostring(consecutive_ineffective_action_count) .. " 次提出无效循环动作，尝试保守恢复：" .. tostring(ineffective_action_reason))
+                    action = ineffective_action_failed_action(CONFIG, memory, ineffective_action_reason, action, consecutive_ineffective_action_count)
+                    repaired_text = nil
+                    break
+                end
+
+                reset_recovery_counts("ineffective_action")
+                LCC.log(1, "模型提出无效循环动作，连续第 " .. tostring(consecutive_ineffective_action_count) .. " 次，正在重问")
+                Config.append_log(CONFIG, {
+                    time = sys.mtime(),
+                    type = "ineffective_action_retry",
+                    step = step,
+                    retry = consecutive_ineffective_action_count,
+                    action = action,
+                    reason = ineffective_action_reason,
+                    model_response = model_text,
+                    repaired_response = repaired_text,
+                })
+                prepare_retry_frame(tostring(step) .. "_ineffective_action_" .. tostring(consecutive_ineffective_action_count), ineffective_action_retry_instruction(ineffective_action_reason, action, consecutive_ineffective_action_count))
+            end
         end
-        if not Parser.is_coordinate_missing_error(parse_err) then
+        local parse_search_reason = parse_err and search_exploration_reason(CONFIG, memory, model_text, nil) or nil
+        if parse_search_reason then
+            consecutive_search_exploration_count = consecutive_search_exploration_count + 1
+            if consecutive_search_exploration_count > CONFIG.search_exploration_retry_count or model_call_index >= max_recovery_model_calls then
+                LCC.log(1, "模型输出不可执行且过早得出找不到结论，改为继续探索：" .. tostring(parse_search_reason))
+                action = fallback_search_slide_action(parse_search_reason, CONFIG, memory)
+                repaired_text = nil
+                break
+            end
+
+            reset_recovery_counts("search_exploration")
+            LCC.log(1, "模型输出不可执行且搜索未穷尽，连续第 " .. tostring(consecutive_search_exploration_count) .. " 次，正在重问")
+            Config.append_log(CONFIG, {
+                time = sys.mtime(),
+                type = "search_exploration_retry",
+                step = step,
+                retry = consecutive_search_exploration_count,
+                error = parse_err,
+                reason = parse_search_reason,
+                model_response = model_text,
+                repaired_response = repaired_text,
+            })
+            prepare_retry_frame(tostring(step) .. "_search_exploration_" .. tostring(consecutive_search_exploration_count), search_exploration_retry_instruction(parse_search_reason, consecutive_search_exploration_count))
+        elseif parse_err and not Parser.is_coordinate_missing_error(parse_err) then
             consecutive_parse_error_count = consecutive_parse_error_count + 1
             if consecutive_parse_error_count >= CONFIG.parse_context_reset_count then
                 if not use_parse_reset_history then
@@ -264,12 +752,10 @@ local function run_step(step, memory)
                 break
             end
 
-            total_coordinate_retries = 0
-            last_missing_action_type = nil
-            consecutive_missing_count = 0
+            reset_coordinate_retry_counts()
             LCC.log(1, "模型输出无法解析，连续第 " .. tostring(consecutive_parse_error_count) .. " 次，正在重问")
             Config.append_log(CONFIG, {
-                time = Config.now_ms(),
+                time = sys.mtime(),
                 type = "parse_retry",
                 step = step,
                 retry = consecutive_parse_error_count,
@@ -278,10 +764,8 @@ local function run_step(step, memory)
                 repaired_response = repaired_text,
                 error = parse_err,
             })
-            image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(tostring(step) .. "_parse_" .. tostring(consecutive_parse_error_count))
-            retry_instruction = parse_retry_instruction(parse_err, model_text, consecutive_parse_error_count, use_parse_reset_history)
-            sys.msleep(300)
-        else
+            prepare_retry_frame(tostring(step) .. "_parse_" .. tostring(consecutive_parse_error_count), parse_retry_instruction(parse_err, model_text, consecutive_parse_error_count, use_parse_reset_history))
+        elseif parse_err then
             local missing_action_type = Parser.coordinate_missing_action_type(parse_err) or "UNKNOWN"
             if missing_action_type == last_missing_action_type then
                 consecutive_missing_count = consecutive_missing_count + 1
@@ -308,7 +792,7 @@ local function run_step(step, memory)
             total_coordinate_retries = total_coordinate_retries + 1
             LCC.log(1, "模型输出 " .. missing_action_type .. " 缺少坐标，连续第 " .. tostring(consecutive_missing_count) .. " 次，正在第 " .. tostring(total_coordinate_retries) .. " 次重问坐标")
             Config.append_log(CONFIG, {
-                time = Config.now_ms(),
+                time = sys.mtime(),
                 type = "coordinate_retry",
                 step = step,
                 retry = total_coordinate_retries,
@@ -317,22 +801,21 @@ local function run_step(step, memory)
                 error = parse_err,
                 model_response = model_text,
             })
-            image_data_url, screenshot_path, observation_prompt, observation_meta = capture_frame(tostring(step) .. "_coordinate_" .. tostring(total_coordinate_retries))
-            retry_instruction = coordinate_retry_instruction(parse_err, model_text, consecutive_missing_count, missing_action_type)
-            sys.msleep(300)
+            prepare_retry_frame(tostring(step) .. "_coordinate_" .. tostring(total_coordinate_retries), coordinate_retry_instruction(parse_err, model_text, consecutive_missing_count, missing_action_type))
         end
     end
 
     if not action then
         action = parse_retry_failed_action(parse_err or "模型恢复循环结束但没有可执行动作", math.max(consecutive_parse_error_count, consecutive_missing_count))
     end
+    action = Memory.sanitize_action(action)
 
     local original_action = action
     local guard_reason = Memory.detect_repetition(CONFIG, memory, action)
     if guard_reason then
         action = make_guard_action(original_action, guard_reason)
         Config.append_log(CONFIG, {
-            time = Config.now_ms(),
+            time = sys.mtime(),
             type = "guard",
             step = step,
             reason = guard_reason,
@@ -340,8 +823,23 @@ local function run_step(step, memory)
         })
     end
 
+    local unrelated_click_reason = click_hits_unrelated_visible_text(CONFIG, action, observation)
+    if unrelated_click_reason then
+        local blocked_action = action
+        action = fallback_search_slide_action(unrelated_click_reason, CONFIG, memory, "up")
+        LCC.log(1, "候选点击命中无关文本，改为滑动查找：" .. tostring(unrelated_click_reason))
+        Config.append_log(CONFIG, {
+            time = sys.mtime(),
+            type = "guard",
+            step = step,
+            reason = unrelated_click_reason,
+            original_action = blocked_action,
+            recovery_action = action,
+        })
+    end
+
     local should_stop, execution
-    if action_type(action) == "COMPLETE" and complete_needs_confirmation(memory) then
+    if Parser.normalize_action_type(Parser.field(action, "action", "Action", "action_type", "type")) == "COMPLETE" and complete_needs_confirmation(memory) then
         should_stop = false
         execution = complete_confirmation_execution(action)
     else
@@ -380,7 +878,7 @@ local function run_agent()
     end
 
     local message = "达到最大步数：" .. tostring(CONFIG.max_steps)
-    Config.append_log(CONFIG, { time = Config.now_ms(), type = "stop", reason = "MAX_STEPS_REACHED", message = message })
+    Config.append_log(CONFIG, { time = sys.mtime(), type = "stop", reason = "MAX_STEPS_REACHED", message = message })
     notify_user(message)
     return false, message
 end
